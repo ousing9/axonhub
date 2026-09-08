@@ -20,13 +20,149 @@ import (
 	"github.com/looplj/axonhub/internal/server/biz"
 	"github.com/looplj/axonhub/llm"
 	"github.com/looplj/axonhub/llm/httpclient"
+	"github.com/looplj/axonhub/llm/oauth"
 	"github.com/looplj/axonhub/llm/pipeline"
 	"github.com/looplj/axonhub/llm/streams"
+	"github.com/looplj/axonhub/llm/transformer/openai"
+	"github.com/looplj/axonhub/llm/transformer/openai/codex"
 	responsestransformer "github.com/looplj/axonhub/llm/transformer/openai/responses"
 )
 
 func testHTTPStream(events []*httpclient.StreamEvent) streams.Stream[*httpclient.StreamEvent] {
 	return streams.SliceStream(events)
+}
+
+type passThroughTestTokenGetter struct{}
+
+func (passThroughTestTokenGetter) Get(context.Context) (*oauth.OAuthCredentials, error) {
+	return &oauth.OAuthCredentials{AccessToken: "test-token"}, nil
+}
+
+// Exercise real Codex and Images transformers with the production pass-through
+// middleware. No database, account credentials, or upstream requests are needed.
+func TestCodexImagePassThroughRoundTrip(t *testing.T) {
+	codexOutbound, err := codex.NewOutboundTransformer(codex.Params{
+		BaseURL:       "https://chatgpt.com/backend-api/codex#",
+		TokenProvider: passThroughTestTokenGetter{},
+	})
+	require.NoError(t, err)
+	channel := &biz.Channel{Channel: &ent.Channel{
+		ID: 1,
+		Settings: &objects.ChannelSettings{
+			PassThroughBody: lo.ToPtr(true),
+		},
+	}}
+
+	for _, tt := range []struct {
+		name    string
+		inbound *openai.ImageInboundTransformer
+		body    string
+		action  string
+	}{
+		{
+			name:    "generation",
+			inbound: openai.NewImageGenerationInboundTransformer(),
+			body:    `{"model":"gpt-image-2","prompt":"a blue robot","output_format":"png"}`,
+			action:  "generate",
+		},
+		{
+			name:    "json edit",
+			inbound: openai.NewImageEditInboundTransformer(),
+			body:    `{"model":"gpt-image-2","prompt":"make it blue","image":"data:image/png;base64,aW1hZ2U=","output_format":"png"}`,
+			action:  "edit",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := t.Context()
+			llmReq, err := tt.inbound.TransformRequest(ctx, &httpclient.Request{
+				Headers: http.Header{"Content-Type": {"application/json"}},
+				Body:    []byte(tt.body),
+			})
+			require.NoError(t, err)
+			request, err := codexOutbound.TransformRequest(ctx, llmReq)
+			require.NoError(t, err)
+			state := &PersistenceState{
+				CurrentCandidate:      &ChannelModelsCandidate{Channel: channel},
+				LlmRequest:            llmReq,
+				OriginalRequestStream: llmReq.Stream,
+			}
+			outbound := &PersistentOutboundTransformer{wrapped: codexOutbound, state: state}
+			request, err = applyPassThroughRequestBody(outbound, nil).OnOutboundRawRequest(ctx, request)
+			require.NoError(t, err)
+			assert.False(t, state.PassThroughApplied)
+			assert.Equal(t, "gpt-5.4-mini", gjson.GetBytes(request.Body, "model").String())
+			assert.Equal(t, "image_generation", gjson.GetBytes(request.Body, "tools.0.type").String())
+			assert.Equal(t, "gpt-image-2", gjson.GetBytes(request.Body, "tools.0.model").String())
+			assert.Equal(t, tt.action, gjson.GetBytes(request.Body, "tools.0.action").String())
+			assert.True(t, gjson.GetBytes(request.Body, "stream").Bool())
+
+			upstream := &httpclient.Response{
+				StatusCode: http.StatusOK,
+				Request:    request,
+				Body:       []byte(`{"id":"resp_image","object":"response","created_at":1760000000,"status":"completed","model":"gpt-5.4-mini","output":[{"type":"image_generation_call","status":"completed","result":"aW1hZ2U="}]}`),
+			}
+			_, err = captureRawProviderResponse(outbound, nil).OnOutboundRawResponse(ctx, upstream)
+			require.NoError(t, err)
+			assert.Nil(t, state.RawProviderResponse)
+			llmResp, err := codexOutbound.TransformResponse(ctx, upstream)
+			require.NoError(t, err)
+			clientResp, err := tt.inbound.TransformResponse(ctx, llmResp)
+			require.NoError(t, err)
+			clientResp, err = applyPassThroughResponse(outbound, nil).OnInboundRawResponse(ctx, clientResp)
+			require.NoError(t, err)
+			assert.Equal(t, "aW1hZ2U=", gjson.GetBytes(clientResp.Body, "data.0.b64_json").String())
+			assert.False(t, gjson.GetBytes(clientResp.Body, "output").Exists())
+
+			// A streaming image request must also retain the converted Images events.
+			llmReq.Stream = lo.ToPtr(true)
+			state.OriginalRequestStream = lo.ToPtr(true)
+			rawStream := testHTTPStream([]*httpclient.StreamEvent{{Type: "response.completed", Data: upstream.Body}})
+			captured, err := captureRawProviderStream(outbound, nil).OnOutboundRawStream(ctx, rawStream)
+			require.NoError(t, err)
+			require.NoError(t, captured.Close())
+			assert.Nil(t, state.RawStreamCh)
+			converted := testHTTPStream([]*httpclient.StreamEvent{{Type: "image_generation.completed", Data: clientResp.Body}})
+			result, err := applyPassThroughStream(outbound, nil).OnInboundRawStream(ctx, converted)
+			require.NoError(t, err)
+			require.True(t, result.Next())
+			assert.Equal(t, "image_generation.completed", result.Current().Type)
+			require.NoError(t, result.Close())
+		})
+	}
+}
+
+func TestCodexResponsesPassThroughRemainsEnabled(t *testing.T) {
+	ctx := t.Context()
+	codexOutbound, err := codex.NewOutboundTransformer(codex.Params{
+		BaseURL:       "https://chatgpt.com/backend-api/codex#",
+		TokenProvider: passThroughTestTokenGetter{},
+	})
+	require.NoError(t, err)
+	llmReq := &llm.Request{
+		Model:     "gpt-5.4-mini",
+		APIFormat: llm.APIFormatOpenAIResponse,
+		Stream:    lo.ToPtr(true),
+		Messages:  []llm.Message{{Role: "user", Content: llm.MessageContent{Content: lo.ToPtr("hi")}}},
+		RawRequest: &httpclient.Request{
+			Headers: http.Header{"Content-Type": {"application/json"}},
+			Body:    []byte(`{"model":"gpt-5.4-mini","input":[{"role":"user","content":"hi"}],"stream":true,"store":false,"custom_client_field":{"keep":true}}`),
+		},
+	}
+	request, err := codexOutbound.TransformRequest(ctx, llmReq)
+	require.NoError(t, err)
+	outbound := &PersistentOutboundTransformer{wrapped: codexOutbound, state: &PersistenceState{
+		CurrentCandidate: &ChannelModelsCandidate{Channel: &biz.Channel{Channel: &ent.Channel{
+			ID:       1,
+			Settings: &objects.ChannelSettings{PassThroughBody: lo.ToPtr(true)},
+		}}},
+		LlmRequest:            llmReq,
+		OriginalRequestStream: llmReq.Stream,
+	}}
+	processed, err := applyPassThroughRequestBody(outbound, nil).OnOutboundRawRequest(ctx, request)
+	require.NoError(t, err)
+	require.True(t, outbound.state.PassThroughApplied)
+	assert.JSONEq(t, string(llmReq.RawRequest.Body), string(processed.Body))
+	assert.True(t, outbound.isPassThroughEnabled(ctx, nil), "Responses response/stream pass-through stays enabled")
 }
 
 // === captureRawProviderResponse tests ===

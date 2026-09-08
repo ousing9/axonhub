@@ -201,7 +201,6 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 	// Clone request so we do not mutate upstream pipeline state.
 	reqCopy := *llmReq
 	originalRequestType := reqCopy.RequestType
-	originalAPIFormat := reqCopy.APIFormat
 	isImageRequest := originalRequestType == llm.RequestTypeImage
 
 	// Codex expects Responses API payload with some strict rules.
@@ -261,7 +260,8 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 
 	if isImageRequest {
 		hreq.RequestType = originalRequestType.String()
-		hreq.APIFormat = originalAPIFormat.String()
+		// Keep the upstream Responses API format so pass-through cannot replay
+		// an Images body or bypass conversion of the Responses result to Images.
 	}
 
 	// Overwrite auth.

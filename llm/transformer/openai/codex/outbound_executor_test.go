@@ -192,7 +192,7 @@ func TestCodexOutbound_ImageGenerationRequestUsesResponsesImageTool(t *testing.T
 	require.NoError(t, err)
 
 	require.Equal(t, llm.RequestTypeImage.String(), req.RequestType)
-	require.Equal(t, llm.APIFormatOpenAIImageGeneration.String(), req.APIFormat)
+	require.Equal(t, llm.APIFormatOpenAIResponse.String(), req.APIFormat)
 	require.Equal(t, "text/event-stream", req.Headers.Get("Accept"))
 	require.Equal(t, accessToken, req.Auth.APIKey)
 
@@ -255,7 +255,7 @@ func TestCodexOutbound_ImageEditRequestUsesResponsesImageTool(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(t, llm.RequestTypeImage.String(), req.RequestType)
-	require.Equal(t, llm.APIFormatOpenAIImageEdit.String(), req.APIFormat)
+	require.Equal(t, llm.APIFormatOpenAIResponse.String(), req.APIFormat)
 
 	var payload responses.Request
 	require.NoError(t, json.Unmarshal(req.Body, &payload))
