@@ -771,3 +771,18 @@ func addFilePart(t *testing.T, writer *multipart.Writer, fieldName, filename, co
 	_, err = part.Write(data)
 	require.NoError(t, err)
 }
+
+func TestImageEditCodexImagesValidation(t *testing.T) {
+	for _, tc := range []struct{ name, fields string }{
+		{"ambiguous", `"image":"data:image/png;base64,aW1hZ2U=","images":[{"image_url":"data:image/png;base64,aW1hZ2U="}]`},
+		{"invalid data", `"images":[{"image_url":"data:image/png;base64,!!"}]`},
+		{"missing url", `"images":[{}]`},
+		{"remote url", `"images":[{"image_url":"https://example.com/private.png"}]`},
+		{"wrong shape", `"images":["data:image/png;base64,aW1hZ2U="]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewImageEditInboundTransformer().TransformRequest(t.Context(), &httpclient.Request{Headers: http.Header{"Content-Type": {"application/json"}}, Body: []byte(`{"model":"gpt-image-2","prompt":"edit",` + tc.fields + `}`)})
+			require.Error(t, err)
+		})
+	}
+}

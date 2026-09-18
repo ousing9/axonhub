@@ -344,21 +344,25 @@ func (t *ImageInboundTransformer) transformEditRequest(httpReq *httpclient.Reque
 // The Image field accepts a single data URL string or an array of data URL strings;
 // Mask accepts a data URL string.
 type ImageEditJSONRequest struct {
-	Prompt            string          `json:"prompt"`
-	Model             string          `json:"model"`
-	Image             json.RawMessage `json:"image,omitempty"`
-	Mask              string          `json:"mask,omitempty"`
-	N                 *int64          `json:"n,omitempty"`
-	Size              string          `json:"size,omitempty"`
-	Quality           string          `json:"quality,omitempty"`
-	ResponseFormat    string          `json:"response_format,omitempty"`
-	User              string          `json:"user,omitempty"`
-	Background        string          `json:"background,omitempty"`
-	OutputFormat      string          `json:"output_format,omitempty"`
-	OutputCompression *int64          `json:"output_compression,omitempty"`
-	InputFidelity     string          `json:"input_fidelity,omitempty"`
-	PartialImages     *int64          `json:"partial_images,omitempty"`
-	Stream            bool            `json:"stream,omitempty"`
+	Prompt string          `json:"prompt"`
+	Model  string          `json:"model"`
+	Image  json.RawMessage `json:"image,omitempty"`
+	// Codex's Images API uses images[].image_url for JSON edits.
+	Images []struct {
+		ImageURL string `json:"image_url"`
+	} `json:"images,omitempty"`
+	Mask              string `json:"mask,omitempty"`
+	N                 *int64 `json:"n,omitempty"`
+	Size              string `json:"size,omitempty"`
+	Quality           string `json:"quality,omitempty"`
+	ResponseFormat    string `json:"response_format,omitempty"`
+	User              string `json:"user,omitempty"`
+	Background        string `json:"background,omitempty"`
+	OutputFormat      string `json:"output_format,omitempty"`
+	OutputCompression *int64 `json:"output_compression,omitempty"`
+	InputFidelity     string `json:"input_fidelity,omitempty"`
+	PartialImages     *int64 `json:"partial_images,omitempty"`
+	Stream            bool   `json:"stream,omitempty"`
 }
 
 func (t *ImageInboundTransformer) transformEditJSONRequest(httpReq *httpclient.Request) (*llm.Request, error) {
@@ -386,6 +390,17 @@ func (t *ImageInboundTransformer) transformEditJSONRequest(httpReq *httpclient.R
 	model := strings.TrimSpace(editReq.Model)
 	if model == "" {
 		model = "dall-e-2"
+	}
+
+	if len(editReq.Images) > 0 {
+		if len(editReq.Image) > 0 && string(editReq.Image) != "null" {
+			return nil, fmt.Errorf("%w: provide image or images, not both", transformer.ErrInvalidRequest)
+		}
+		urls := make([]string, len(editReq.Images))
+		for i, image := range editReq.Images {
+			urls[i] = image.ImageURL
+		}
+		editReq.Image, _ = json.Marshal(urls)
 	}
 
 	images, err := parseGenerationImageField(editReq.Image)

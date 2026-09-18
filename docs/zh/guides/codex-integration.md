@@ -88,3 +88,11 @@ AxonHub 的模型配置文件支持将请求模型映射到具体提供商模型
 - [追踪指南](tracing.md)
 - [OpenAI API 文档](../api-reference/openai-api.md)
 - README 中的 [使用指南](../../../README.md#使用指南--usage-guide)
+
+## ChatGPT Codex 渠道的图像请求
+
+指向官方 Codex 后端的渠道使用原生 `/images/generations` 和 `/images/edits`，与文本请求共用渠道的 OAuth 登录。图像请求直接保留所选图像模型，不依赖额外的文本主模型；即使渠道为 Responses 配置了 WebSocket，图像请求也使用 HTTP。
+
+普通 Responses 的透传行为保持不变。图像生成可透传；编辑请求会转换成 Codex 要求的 `images: [{"image_url": "data:..."}]`，因此编辑请求体不会直接透传。支持公共格式 JSON `image`、multipart 上传和 Codex JSON `images` 输入；带参考图的生成请求也转到编辑接口。
+
+Codex 原生编辑接口会忽略 `mask`。为避免返回超出遮罩区域的修改，带遮罩的请求会明确报错。第三方兼容中继继续使用原有的 Responses 图像转换路径。

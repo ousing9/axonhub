@@ -1,11 +1,14 @@
 package orchestrator
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"strings"
 	"sync"
 	"testing"
@@ -43,7 +46,7 @@ func (passThroughTestTokenGetter) Get(context.Context) (*oauth.OAuthCredentials,
 // middleware. No database, account credentials, or upstream requests are needed.
 func TestCodexImagePassThroughRoundTrip(t *testing.T) {
 	codexOutbound, err := codex.NewOutboundTransformer(codex.Params{
-		BaseURL:       "https://chatgpt.com/backend-api/codex#",
+		BaseURL:       "https://relay.example/codex#",
 		TokenProvider: passThroughTestTokenGetter{},
 	})
 	require.NoError(t, err)
@@ -138,6 +141,74 @@ func TestCodexImagePassThroughRoundTrip(t *testing.T) {
 				require.True(t, result.Next())
 				assert.Equal(t, "image_generation.completed", result.Current().Type)
 				require.NoError(t, result.Close())
+			})
+		}
+	}
+}
+
+func TestNativeCodexImagesPassThroughRoundTrip(t *testing.T) {
+	outbound, err := codex.NewOutboundTransformer(codex.Params{TokenProvider: passThroughTestTokenGetter{}})
+	require.NoError(t, err)
+	for _, enabled := range []bool{false, true} {
+		for _, tt := range []struct {
+			name, body string
+			inbound    *openai.ImageInboundTransformer
+			edit       bool
+		}{
+			{"generation", `{"model":"gpt-image-2.5-flare","prompt":"a blue robot","quality":"low","custom_field":"keep"}`, openai.NewImageGenerationInboundTransformer(), false},
+			{"reference generation", `{"model":"gpt-image-2","prompt":"make it green","image":"data:image/png;base64,aW1hZ2U="}`, openai.NewImageGenerationInboundTransformer(), true},
+			{"public edit", `{"model":"gpt-image-2","prompt":"make it green","image":"data:image/png;base64,aW1hZ2U="}`, openai.NewImageEditInboundTransformer(), true},
+			{"multipart edit", "", openai.NewImageEditInboundTransformer(), true},
+			{"codex edit", `{"model":"gpt-image-2","prompt":"make it green","images":[{"image_url":"data:image/png;base64,aW1hZ2U="}]}`, openai.NewImageEditInboundTransformer(), true},
+		} {
+			t.Run(fmt.Sprintf("%t/%s", enabled, tt.name), func(t *testing.T) {
+				ctx := t.Context()
+				rawRequest := &httpclient.Request{Headers: http.Header{"Content-Type": {"application/json"}}, Body: []byte(tt.body)}
+				if tt.name == "multipart edit" {
+					var buffer bytes.Buffer
+					writer := multipart.NewWriter(&buffer)
+					require.NoError(t, writer.WriteField("model", "gpt-image-2"))
+					require.NoError(t, writer.WriteField("prompt", "make it green"))
+					file, err := writer.CreatePart(textproto.MIMEHeader{"Content-Disposition": {`form-data; name="image"; filename="image.png"`}, "Content-Type": {"image/png"}})
+					require.NoError(t, err)
+					_, err = file.Write([]byte("\x89PNG\r\n\x1a\nimage"))
+					require.NoError(t, err)
+					require.NoError(t, writer.Close())
+					rawRequest.Body = buffer.Bytes()
+					rawRequest.Headers.Set("Content-Type", writer.FormDataContentType())
+				}
+				req, err := tt.inbound.TransformRequest(ctx, rawRequest)
+				require.NoError(t, err)
+				provider, err := outbound.TransformRequest(ctx, req)
+				require.NoError(t, err)
+				state := &PersistenceState{CurrentCandidate: &ChannelModelsCandidate{Channel: &biz.Channel{Channel: &ent.Channel{ID: 1, Settings: &objects.ChannelSettings{PassThroughBody: lo.ToPtr(enabled)}}}}, LlmRequest: req, OriginalRequestStream: req.Stream}
+				wrapped := &PersistentOutboundTransformer{wrapped: outbound, state: state}
+				provider, err = applyPassThroughRequestBody(wrapped, nil).OnOutboundRawRequest(ctx, provider)
+				require.NoError(t, err)
+				require.Equal(t, enabled && !tt.edit, state.PassThroughApplied)
+				require.Equal(t, req.Model, gjson.GetBytes(provider.Body, "model").String())
+				require.False(t, gjson.GetBytes(provider.Body, "tools").Exists())
+				if tt.edit {
+					require.True(t, gjson.GetBytes(provider.Body, "images.0.image_url").Exists())
+					require.False(t, gjson.GetBytes(provider.Body, "image").Exists())
+					require.Equal(t, "application/json", provider.Headers.Get("Content-Type"))
+				} else if enabled {
+					require.Equal(t, "keep", gjson.GetBytes(provider.Body, "custom_field").String())
+				}
+				raw := &httpclient.Response{StatusCode: 200, Request: provider, Body: []byte(`{"created":123,"data":[{"b64_json":"aW1hZ2U=","generation_id":"gen-test"}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`)}
+				_, err = captureRawProviderResponse(wrapped, nil).OnOutboundRawResponse(ctx, raw)
+				require.NoError(t, err)
+				normalized, err := outbound.TransformResponse(ctx, raw)
+				require.NoError(t, err)
+				require.Equal(t, int64(3), normalized.Usage.TotalTokens)
+				result, err := tt.inbound.TransformResponse(ctx, normalized)
+				require.NoError(t, err)
+				result, err = applyPassThroughResponse(wrapped, nil).OnInboundRawResponse(ctx, result)
+				require.NoError(t, err)
+				require.Equal(t, "aW1hZ2U=", gjson.GetBytes(result.Body, "data.0.b64_json").String())
+				if enabled && tt.name != "reference generation" {
+					require.Equal(t, "gen-test", gjson.GetBytes(result.Body, "data.0.generation_id").String())
+				}
 			})
 		}
 	}
