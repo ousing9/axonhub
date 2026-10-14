@@ -261,12 +261,12 @@ func TestUpstreamModelPipeline_StreamingAndAutoAggregate(t *testing.T) {
 	}
 }
 
-func TestUpstreamModelPersistence_CodexImageResponsesStream(t *testing.T) {
+func TestUpstreamModelPersistence_CodexRelayImageResponsesStream(t *testing.T) {
 	for _, format := range []llm.APIFormat{llm.APIFormatOpenAIImageGeneration, llm.APIFormatOpenAIImageEdit} {
 		t.Run(string(format), func(t *testing.T) {
 			ctx, db, state := newUpstreamModelPersistenceTest(t)
 			outbound, err := codex.NewOutboundTransformer(codex.Params{
-				BaseURL: "https://chatgpt.com/backend-api/codex#",
+				BaseURL: "https://relay.example/backend-api/codex#",
 				TokenProvider: oauth.NewStaticTokenProvider(&oauth.OAuthCredentials{
 					AccessToken: "test-token",
 				}),

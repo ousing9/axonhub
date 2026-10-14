@@ -24,6 +24,7 @@ import (
 	"github.com/looplj/axonhub/llm/pipeline"
 	"github.com/looplj/axonhub/llm/streams"
 	"github.com/looplj/axonhub/llm/transformer"
+	"github.com/looplj/axonhub/llm/transformer/openai"
 	"github.com/looplj/axonhub/llm/transformer/openai/responses"
 	"github.com/looplj/axonhub/llm/transformer/shared"
 )
@@ -53,6 +54,7 @@ type OutboundTransformer struct {
 
 	// reuse existing Responses outbound for payload building.
 	responsesOutbound *responses.OutboundTransformer
+	imagesOutbound    transformer.Outbound
 
 	executorMu         sync.Mutex
 	webSocketExecutors map[pipeline.Executor]*responses.WebSocketExecutor
@@ -154,6 +156,21 @@ func NewOutboundTransformer(params Params) (*OutboundTransformer, error) {
 		return nil, err
 	}
 
+	// A channel may encode its Responses transport in the base URL itself.
+	// Images always use HTTP, even for a wss:// Codex channel.
+	imageBaseURL := strings.TrimRight(baseURL, "#/")
+	imageBaseURL = strings.Replace(imageBaseURL, "wss://", "https://", 1)
+	imageBaseURL = strings.Replace(imageBaseURL, "ws://", "http://", 1)
+	images, err := openai.NewOutboundTransformerWithConfig(&openai.Config{
+		PlatformType:   openai.PlatformOpenAI,
+		BaseURL:        imageBaseURL,
+		RawURL:         true,
+		APIKeyProvider: auth.NewStaticKeyProvider("dummy"),
+	})
+	if err != nil {
+		return nil, err
+	}
+
 	return &OutboundTransformer{
 		tokens:            params.TokenProvider,
 		transport:         params.Transport,
@@ -162,6 +179,7 @@ func NewOutboundTransformer(params Params) (*OutboundTransformer, error) {
 		imageMainModel:    imageMainModel,
 		official:          official,
 		responsesOutbound: ro,
+		imagesOutbound:    images,
 	}, nil
 }
 
@@ -178,6 +196,11 @@ func (t *OutboundTransformer) TokenProvider() oauth.TokenGetter {
 }
 
 func (t *OutboundTransformer) AllowPassThroughBody(_ context.Context, llmReq *llm.Request, _ *httpclient.Request) bool {
+	// Codex edits use images[].image_url, while the public Images dialect
+	// accepts image or multipart. Preserve the normalized upstream body.
+	if t.isOfficialCodex() && llmReq != nil && llmReq.APIFormat == llm.APIFormatOpenAIImageEdit {
+		return false
+	}
 	if llmReq == nil || llmReq.APIFormat != llm.APIFormatOpenAIResponse || llmReq.RawRequest == nil {
 		return true
 	}
@@ -243,6 +266,10 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 	reqCopy := *llmReq
 	originalRequestType := reqCopy.RequestType
 	isImageRequest := originalRequestType == llm.RequestTypeImage
+	// The official backend exposes Images directly. Compatible relays keep
+	// their existing Responses adaptation unless they explicitly support it.
+	useNativeImages := isImageRequest && t.isOfficialCodex() &&
+		(reqCopy.APIFormat == llm.APIFormatOpenAIImageGeneration || reqCopy.APIFormat == llm.APIFormatOpenAIImageEdit)
 
 	// Codex expects Responses API payload with some strict rules.
 	// Always enable stream except for compact requests and disable store.
@@ -263,7 +290,7 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 		reqCopy.TransformerMetadata = map[string]any{}
 	}
 
-	if isImageRequest {
+	if isImageRequest && !useNativeImages {
 		reqCopy.Model = t.imageMainModel
 		reqCopy.TransformerMetadata[responses.ImageGenerationToolModelMetadataKey] = llmReq.Model
 	}
@@ -294,22 +321,25 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 
 	reqCopy.TransformOptions.ArrayInputs = lo.ToPtr(true)
 
-	hreq, err := t.responsesOutbound.TransformRequest(ctx, &reqCopy)
+	var hreq *httpclient.Request
+	if useNativeImages {
+		hreq, err = t.transformNativeImageRequest(ctx, &reqCopy)
+	} else {
+		hreq, err = t.responsesOutbound.TransformRequest(ctx, &reqCopy)
+	}
 	if err != nil {
 		return nil, err
 	}
 
-	if isImageRequest {
-		// Keep the Responses wire format so pass-through cannot replace the
-		// converted payload or response with the incompatible Images format.
-		// RequestType alone selects the image response conversion.
+	if isImageRequest && !useNativeImages {
+		// Preserve the Responses wire format for compatible relays.
 		hreq.RequestType = originalRequestType.String()
 	}
 
 	// Overwrite auth.
 	hreq.Auth = &httpclient.AuthConfig{Type: httpclient.AuthTypeBearer, APIKey: creds.AccessToken}
-	// Compact requests expect JSON response, others expect SSE stream.
-	if llmReq.RequestType == llm.RequestTypeCompact {
+	// Compact and native Images expect JSON; Responses requests expect SSE.
+	if llmReq.RequestType == llm.RequestTypeCompact || useNativeImages {
 		hreq.Headers.Set("Accept", "application/json")
 	} else {
 		hreq.Headers.Set("Accept", "text/event-stream")
@@ -407,6 +437,9 @@ func (t *OutboundTransformer) TransformResponse(ctx context.Context, httpResp *h
 		return t.transformAlphaSearchResponse(ctx, httpResp)
 	}
 	if httpResp != nil && httpResp.Request != nil && httpResp.Request.RequestType == llm.RequestTypeImage.String() {
+		if httpResp.Request.APIFormat != llm.APIFormatOpenAIResponse.String() {
+			return t.imagesOutbound.TransformResponse(ctx, httpResp)
+		}
 		if httpResp.StatusCode >= 400 {
 			return nil, fmt.Errorf("codex image HTTP error %d: %s", httpResp.StatusCode, httpResp.Body)
 		}
@@ -495,10 +528,11 @@ type codexExecutor struct {
 
 func (e *codexExecutor) Do(ctx context.Context, request *httpclient.Request) (*httpclient.Response, error) {
 	request = e.requestForTransport(request)
-	// Compact and alpha search are non-streaming endpoints; proxy them
+	// Compact, alpha search and native Images are non-streaming endpoints; proxy them
 	// through the real HTTP client instead of the SSE stream path.
 	if request.RequestType == string(llm.RequestTypeCompact) ||
-		request.RequestType == llm.RequestTypeAlphaSearch.String() {
+		request.RequestType == llm.RequestTypeAlphaSearch.String() ||
+		(request.RequestType == llm.RequestTypeImage.String() && request.APIFormat != llm.APIFormatOpenAIResponse.String()) {
 		return e.httpExecutor.Do(ctx, request)
 	}
 

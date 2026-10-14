@@ -188,7 +188,7 @@ func TestCodexOutbound_ImageGenerationRequestUsesResponsesImageTool(t *testing.T
 	accessToken := testAccessTokenWithAccountID(t)
 
 	outbound, err := NewOutboundTransformer(Params{
-		BaseURL: "https://chatgpt.com/backend-api/codex#",
+		BaseURL: "https://relay.example/backend-api/codex#",
 		TokenProvider: staticTokenGetter{
 			creds: &oauth.OAuthCredentials{
 				AccessToken: accessToken,
@@ -254,6 +254,7 @@ func TestCodexOutbound_ImageMainModel(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			outbound, err := NewOutboundTransformer(Params{
+				BaseURL:        "https://relay.example/backend-api/codex#",
 				ImageMainModel: tt.configured,
 				TokenProvider:  oauth.NewStaticTokenProvider(&oauth.OAuthCredentials{AccessToken: "test-token"}),
 			})
@@ -284,7 +285,7 @@ func TestCodexOutbound_ImageEditRequestUsesResponsesImageTool(t *testing.T) {
 	ctx := context.Background()
 
 	outbound, err := NewOutboundTransformer(Params{
-		BaseURL: "https://chatgpt.com/backend-api/codex#",
+		BaseURL: "https://relay.example/backend-api/codex#",
 		TokenProvider: staticTokenGetter{
 			creds: &oauth.OAuthCredentials{
 				AccessToken: testAccessTokenWithAccountID(t),

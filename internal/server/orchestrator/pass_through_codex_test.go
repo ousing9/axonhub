@@ -20,7 +20,7 @@ import (
 	"github.com/looplj/axonhub/llm/transformer/openai/codex"
 )
 
-func TestPassThroughCodexImagesPreservesConversion(t *testing.T) {
+func TestPassThroughCodexRelayImagesPreservesConversion(t *testing.T) {
 	const responseBody = `{"id":"resp_image","object":"response","created_at":123,"model":"gpt-6-luna","status":"completed","output":[{"id":"img","type":"image_generation_call","status":"completed","result":"aW1hZ2U="}]}`
 	for _, input := range []struct {
 		name    string
@@ -41,7 +41,6 @@ func TestPassThroughCodexImagesPreservesConversion(t *testing.T) {
 			name    string
 			baseURL string
 		}{
-			{name: "official SSE", baseURL: "https://chatgpt.com/backend-api/codex#"},
 			{name: "relay JSON", baseURL: "https://relay.example/backend-api/codex#"},
 		} {
 			t.Run(input.name+"/"+upstream.name, func(t *testing.T) {

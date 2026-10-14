@@ -142,3 +142,11 @@ You can manually trigger a quota refresh by clicking the refresh icon in the quo
 - [Tracing Guide](tracing.md)
 - [OpenAI API](../api-reference/openai-api.md)
 - README sections on [Usage Guide](../../../README.en-US.md#usage-guide)
+
+## Images on ChatGPT Codex channels
+
+Channels targeting the official Codex backend use native `/images/generations` and `/images/edits` with the channel's existing OAuth login. Image requests preserve the selected image model without an auxiliary text model. They use HTTP even when the channel uses WebSocket for Responses.
+
+Normal Responses pass-through is unchanged. Generation bodies may pass through; edit bodies are converted to Codex's `images: [{"image_url": "data:..."}]` representation and are not replayed verbatim. Public JSON `image`, multipart uploads, and Codex JSON `images` inputs are accepted. Generation requests containing reference images also use the edit endpoint.
+
+The native Codex edit endpoint ignores `mask`. Requests containing masks therefore fail explicitly to avoid returning edits outside the requested region. Third-party compatible relays retain the existing Responses image conversion path.
