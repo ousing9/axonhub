@@ -139,7 +139,8 @@ type ChatCompletionOrchestrator struct {
 	// If set, it will override the channel's default proxy configuration
 	proxy *httpclient.ProxyConfig
 
-	responsesSessions *responsesSessionStore
+	responsesSessions  *responsesSessionStore
+	agentCompatibility AgentCompatibilityConfig
 }
 
 func (processor *ChatCompletionOrchestrator) WithChannelSelector(selector CandidateSelector) *ChatCompletionOrchestrator {
@@ -176,6 +177,14 @@ func (processor *ChatCompletionOrchestrator) Process(ctx context.Context, reques
 		preparedResponsesBody, sessionID = processor.responsesSessions.prepare(ctx, request.Body)
 		request.Body = preparedResponsesBody
 		ctx = shared.WithSessionID(ctx, sessionID)
+	}
+	var portableAgent bool
+	if shared.IsResponsesAPI(ctx) {
+		var err error
+		request, portableAgent, err = preparePortableAgentRequest(request, processor.agentCompatibility)
+		if err != nil {
+			return ChatCompletionResult{}, err
+		}
 	}
 
 	// API key providers cannot return a derived context, so install the shared
@@ -245,6 +254,7 @@ func (processor *ChatCompletionOrchestrator) Process(ctx context.Context, reques
 	middlewares = append(middlewares, newBillingSystemMessageMiddleware(state))
 
 	inbound, outbound := NewPersistentTransformers(state, processor.Inbound, middlewares...)
+	agentCompatibility := &agentCompatibilityMiddleware{outbound: outbound, config: processor.agentCompatibility, portable: portableAgent}
 
 	// Add inbound middlewares (executed after inbound.TransformRequest)
 	middlewares = append(middlewares,
@@ -259,8 +269,13 @@ func (processor *ChatCompletionOrchestrator) Process(ctx context.Context, reques
 		// response is saved when pass-through is enabled.
 		applyPassThroughResponse(outbound, processor.SystemService),
 		applyPassThroughStream(outbound, processor.SystemService),
-		persistRequest(inbound),
 	)
+	// Normalize portable tool calls after protocol conversion/pass-through and
+	// before persistence, so saved responses and the client see the same marker.
+	if portableAgent {
+		middlewares = append(middlewares, &portableAgentResponseMiddleware{})
+	}
+	middlewares = append(middlewares, persistRequest(inbound))
 
 	// Add outbound middlewares (executed after outbound.TransformRequest)
 	middlewares = append(middlewares,
@@ -278,6 +293,7 @@ func (processor *ChatCompletionOrchestrator) Process(ctx context.Context, reques
 		// User-Agent if configured.
 		applyUserAgentPassThrough(outbound, processor.SystemService),
 		applyOverrideRequestHeaders(outbound),
+		pipeline.OnRawRequest("codex-v2-agent-compatibility-request", agentCompatibility.prepareRequest),
 		// Remove transport-incompatible fields after pass-through and overrides,
 		// so persistence and execution observe the same provider request.
 		finalizeTransportRequest(outbound),
@@ -308,6 +324,9 @@ func (processor *ChatCompletionOrchestrator) Process(ctx context.Context, reques
 		captureRawProviderResponse(outbound, processor.SystemService),
 		captureRawProviderStream(outbound, processor.SystemService),
 	)
+	// Last registration restores raw provider events before pass-through capture
+	// (outbound response middleware runs in reverse).
+	middlewares = append(middlewares, agentCompatibility)
 
 	pipelineOpts = append(pipelineOpts, pipeline.WithMiddlewares(middlewares...))
 

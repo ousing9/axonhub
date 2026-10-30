@@ -48,6 +48,7 @@ type OpenAIHandlersParams struct {
 	ProviderQuotaStatusProvider orchestrator.ProviderQuotaStatusProvider
 	Client                      *ent.Client
 	SSEKeepAliveConfig          SSEKeepAliveConfig
+	CodexAgentCompatibility     orchestrator.AgentCompatibilityConfig `optional:"true"`
 }
 
 type OpenAIHandlers struct {
@@ -134,7 +135,7 @@ func NewOpenAIHandlers(params OpenAIHandlersParams) *OpenAIHandlers {
 				params.LiveStreamRegistry,
 				params.ChannelLimiterManager,
 				params.ProviderQuotaStatusProvider,
-			),
+			).WithAgentCompatibility(params.CodexAgentCompatibility),
 		},
 		CompactHandlers: &ChatCompletionHandlers{
 			ChatCompletionOrchestrator: orchestrator.NewChatCompletionOrchestrator(

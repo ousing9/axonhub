@@ -2,6 +2,15 @@
 # AxonHub Configuration Example
 # Copy this file to config.yml and modify as needed
 
+# Optional Codex V2 DeepSeek task transport (disabled by default).
+# Keeps native collaboration tools and appends three DeepSeek-only tools to
+# selected GPT Responses passthrough channels. Supported portable model: deepseek-flash.
+# Portable inputs are normalized before protocol conversion, including Chat channels.
+# Startup configuration; changing these fields requires a service restart.
+codex_agent_compatibility:
+  native_channel_ids: []  # GPT Responses passthrough channel IDs
+  portable_models: []     # Enable with ["deepseek-flash"]
+
 # Server configuration
 server:
   host: "0.0.0.0"               # Server host (env: AXONHUB_SERVER_HOST)
