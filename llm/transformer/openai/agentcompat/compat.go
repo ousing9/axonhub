@@ -150,6 +150,12 @@ func RewriteRequest(body []byte, portable bool) ([]byte, error) {
 			changed = true
 		}
 	}
+	if portable {
+		if ordered, ok := alignToolBatches(items); ok {
+			v["input"] = ordered
+			changed = true
+		}
+	}
 	if !changed {
 		return body, nil
 	}

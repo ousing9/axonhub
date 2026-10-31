@@ -11,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 
 	"github.com/looplj/axonhub/internal/authz"
 	"github.com/looplj/axonhub/internal/contexts"
@@ -25,6 +26,86 @@ import (
 	"github.com/looplj/axonhub/llm/transformer/openai/responses"
 	"github.com/looplj/axonhub/llm/transformer/shared"
 )
+
+func TestPortableResponsesHistoryPipeline(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		for _, enabled := range []bool{false, true} {
+			for _, replaceRole := range []bool{false, true} {
+				t.Run(fmt.Sprintf("stream=%t/compat=%t/replace=%t", streaming, enabled, replaceRole), func(t *testing.T) {
+					upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						body, err := io.ReadAll(r.Body)
+						require.NoError(t, err)
+						items := gjson.GetBytes(body, "input").Array()
+						var kinds []string
+						for _, item := range items {
+							kinds = append(kinds, item.Get("type").String())
+						}
+						instruction := 1
+						if enabled {
+							assert.Equal(t, []string{"function_call", "function_call", "function_call_output", "function_call_output", "message"}, kinds)
+							instruction = 4
+						} else {
+							assert.Equal(t, []string{"function_call", "message", "function_call", "function_call_output", "function_call_output"}, kinds)
+						}
+						role := "developer"
+						if enabled && replaceRole {
+							role = "system"
+						}
+						assert.Equal(t, role, items[instruction].Get("role").String())
+						assert.Equal(t, "path guidance", items[instruction].Get("content").String())
+						response := `{"id":"resp_test","object":"response","status":"completed","model":"deepseek-flash","output":[{"type":"message","id":"msg_test","role":"assistant","status":"completed","content":[{"type":"output_text","text":"OK"}]}],"usage":{"input_tokens":10,"output_tokens":1,"total_tokens":11}}`
+						if streaming {
+							w.Header().Set("Content-Type", "text/event-stream")
+							fmt.Fprintf(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":%s}\n\n", response)
+						} else {
+							w.Header().Set("Content-Type", "application/json")
+							fmt.Fprint(w, response)
+						}
+					}))
+					defer upstream.Close()
+					client := enttest.NewEntClient(t, "sqlite3", "file:"+t.Name()+"?mode=memory&_fk=0")
+					defer client.Close()
+					ctx := ent.NewContext(authz.WithTestBypass(t.Context()), client)
+					project := createTestProject(t, ctx, client)
+					ch, err := client.Channel.Create().SetType(channel.TypeOpenaiResponses).SetName("Portable Responses").
+						SetBaseURL(upstream.URL + "/v1").SetCredentials(objects.ChannelCredentials{APIKey: "test-key"}).
+						SetSettings(&objects.ChannelSettings{PassThroughBody: new(true), TransformOptions: objects.TransformOptions{ReplaceDeveloperRoleWithSystem: replaceRole}}).
+						SetSupportedModels([]string{"deepseek-flash"}).SetDefaultTestModel("deepseek-flash").Save(ctx)
+					require.NoError(t, err)
+					outbound, err := responses.NewOutboundTransformer(ch.BaseURL, ch.Credentials.APIKey)
+					require.NoError(t, err)
+					channelService, requestService, systemService, usageLogService := setupTestServices(t, client)
+					o := &ChatCompletionOrchestrator{
+						channelSelector: &staticChannelSelector{candidates: channelsToTestCandidates([]*biz.Channel{{Channel: ch, Outbound: outbound}}, "deepseek-flash")},
+						Inbound:         responses.NewInboundTransformer(), RequestService: requestService,
+						ChannelService: channelService, PromptProvider: &stubPromptProvider{},
+						SystemService: systemService, UsageLogService: usageLogService,
+						PipelineFactory: pipeline.NewFactory(httpclient.NewHttpClientWithClient(upstream.Client())),
+						ModelMapper:     NewModelMapper(), channelLimiterManager: NewChannelLimiterManager(),
+					}
+					if enabled {
+						o = o.WithAgentCompatibility(AgentCompatibilityConfig{PortableModels: []string{"deepseek-flash"}})
+					}
+					ctx = shared.WithResponsesAPI(contexts.WithProjectID(ctx, project.ID))
+					body := fmt.Sprintf(`{"model":"deepseek-flash","stream":%t,"input":[{"type":"function_call","name":"probe","call_id":"a","arguments":"{}"},{"type":"message","role":"developer","content":"path guidance"},{"type":"function_call","name":"probe","call_id":"b","arguments":"{}"},{"type":"function_call_output","call_id":"a","output":"one"},{"type":"function_call_output","call_id":"b","output":"two"}]}`, streaming)
+					result, err := o.Process(ctx, &httpclient.Request{Method: "POST", URL: "/v1/responses", Body: []byte(body)})
+					require.NoError(t, err)
+					if streaming {
+						defer result.ChatCompletionStream.Close()
+						completed := false
+						for result.ChatCompletionStream.Next() {
+							completed = completed || gjson.GetBytes(result.ChatCompletionStream.Current().Data, "type").String() == "response.completed"
+						}
+						require.NoError(t, result.ChatCompletionStream.Err())
+						require.True(t, completed)
+					} else {
+						require.Contains(t, string(result.ChatCompletion.Body), "OK")
+					}
+				})
+			}
+		}
+	}
+}
 
 // Exercise Process itself: normalization must happen before the Responses
 // parser, and the plaintext marker must be added after Chat -> Responses conversion.

@@ -8,6 +8,7 @@ import (
 	"slices"
 
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 
 	"github.com/looplj/axonhub/llm"
 	"github.com/looplj/axonhub/llm/httpclient"
@@ -74,7 +75,29 @@ func (m *agentCompatibilityMiddleware) prepareRequest(_ context.Context, req *ht
 	if ch == nil || req == nil || req.APIFormat != string(llm.APIFormatOpenAIResponse) {
 		return req, nil
 	}
-	if m.portable || !slices.Contains(m.config.NativeChannelIDs, ch.ID) {
+	if m.portable {
+		// Pass-through replays the raw input after applyTransformOptions. Honor
+		// this explicit channel option on the final portable Responses body too.
+		if ch.Settings == nil || !ch.Settings.TransformOptions.ReplaceDeveloperRoleWithSystem {
+			return req, nil
+		}
+		body := req.Body
+		for i, item := range gjson.GetBytes(body, "input").Array() {
+			if (item.Get("type").String() == "message" || !item.Get("type").Exists()) && item.Get("role").String() == "developer" {
+				var err error
+				body, err = sjson.SetBytes(body, fmt.Sprintf("input.%d.role", i), "system")
+				if err != nil {
+					return nil, err
+				}
+			}
+		}
+		copy := *req
+		copy.Body = body
+		copy.Headers = req.Headers.Clone()
+		copy.Headers.Del("Content-Length")
+		return &copy, nil
+	}
+	if !slices.Contains(m.config.NativeChannelIDs, ch.ID) {
 		return req, nil
 	}
 	// The full private tool schema and plaintext marker must survive both directions.

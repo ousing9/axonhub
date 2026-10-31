@@ -28,6 +28,28 @@ func compatibilityTestState() (*agentCompatibilityMiddleware, *PersistenceState)
 	return &agentCompatibilityMiddleware{outbound: &PersistentOutboundTransformer{state: state}, config: AgentCompatibilityConfig{NativeChannelIDs: []int{36}, PortableModels: []string{"deepseek-flash"}}}, state
 }
 
+func TestPortablePassthroughHonorsRoleOption(t *testing.T) {
+	m, state := compatibilityTestState()
+	m.portable = true
+	ch := state.CurrentCandidate.Channel
+	ch.Settings.TransformOptions.ReplaceDeveloperRoleWithSystem = true
+	raw := &httpclient.Request{APIFormat: string(llm.APIFormatOpenAIResponse), Body: []byte(`{"input":[{"type":"message","role":"developer","content":"instruction"},{"role":"developer","content":"implicit message"},{"type":"function_call_output","role":"developer","output":"opaque data"},{"type":"message","role":"user","content":"request"}]}`)}
+	got, err := m.prepareRequest(t.Context(), raw)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"input":[{"type":"message","role":"system","content":"instruction"},{"role":"system","content":"implicit message"},{"type":"function_call_output","role":"developer","output":"opaque data"},{"type":"message","role":"user","content":"request"}]}`, string(got.Body))
+	require.Contains(t, string(raw.Body), `"role":"developer","content":"instruction"`, "do not mutate persisted input")
+	require.False(t, m.active, "portable requests must not enable GPT response rewrites")
+	ch.Settings.TransformOptions.ReplaceDeveloperRoleWithSystem = false
+	got, err = m.prepareRequest(t.Context(), raw)
+	require.NoError(t, err)
+	require.Same(t, raw, got)
+	// Retry/failover must use the newly selected channel's option.
+	ch.Settings = nil
+	got, err = m.prepareRequest(t.Context(), raw)
+	require.NoError(t, err)
+	require.Same(t, raw, got)
+}
+
 func TestAgentCompatibilityDisabledAndOtherFormats(t *testing.T) {
 	m, _ := compatibilityTestState()
 	ctx := context.Background()

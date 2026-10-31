@@ -6,6 +6,9 @@
 # Keeps native collaboration tools and appends three DeepSeek-only tools to
 # selected GPT Responses passthrough channels. Supported portable model: deepseek-flash.
 # Portable inputs are normalized before protocol conversion, including Chat channels.
+# Completed tool batches interrupted by system/developer guidance are kept contiguous;
+# guidance is retained after the batch. Ambiguous histories are left untouched.
+# Portable Responses passthrough also honors replaceDeveloperRoleWithSystem.
 # Startup configuration; changing these fields requires a service restart.
 codex_agent_compatibility:
   native_channel_ids: []  # GPT Responses passthrough channel IDs
