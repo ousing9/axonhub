@@ -4,23 +4,21 @@
 
 ## 基线与补丁清单
 
-截至 2026-10-31，维护分支为 `codex/v2-portable-agents`，基于上游 `v1.0.0-beta11`（`b8bb3421`）。自维护代码发布到 CNB，远端分工如下：
+截至 2026-10-31，维护分支为 `codex/v2-portable-agents`，基于上游 `v1.0.0-beta11`（`b8bb3421`）。自维护代码发布到个人 GitHub fork，远端分工如下：
 
 | Remote | 地址 | 用途 |
 | --- | --- | --- |
-| `origin` | `https://cnb.cool/ousing9/axonhub` | 自维护代码的主要推送仓库 |
+| `origin` | `git@github.com:ousing9/axonhub.git` | 自维护代码的主要推送仓库 |
 | `upstream` | `https://github.com/looplj/axonhub.git` | 官方主线，获取版本与合并更新 |
-| `github` | `git@github.com:ousing9/axonhub.git` | 保留原个人 GitHub fork；按需显式推送 |
 
-本地设置 `remote.pushDefault=origin`，维护分支跟踪 `origin/codex/v2-portable-agents`。日常推送使用 `git push`，获取官方更新使用 `git fetch upstream --tags`；向 CNB 推送不会自动同步 GitHub。Git remote 配置由同一仓库的 worktree 共用。
+本地设置 `remote.pushDefault=origin`，维护分支跟踪 `origin/codex/v2-portable-agents`。日常推送使用 `git push`，获取官方更新使用 `git fetch upstream --tags`。Git remote 配置由同一仓库的 worktree 共用。
 
 新克隆可使用：
 
 ```bash
-git clone --branch codex/v2-portable-agents https://cnb.cool/ousing9/axonhub
+git clone --branch codex/v2-portable-agents git@github.com:ousing9/axonhub.git
 cd axonhub
 git remote add upstream https://github.com/looplj/axonhub.git
-git remote add github git@github.com:ousing9/axonhub.git
 git config remote.pushDefault origin
 ```
 
