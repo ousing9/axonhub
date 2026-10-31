@@ -19,6 +19,8 @@
 
 </div>
 
+For this fork's Codex image and DeepSeek compatibility patches, upstream upgrade acceptance, and rollback, see [Codex fork maintenance](docs/en/guides/codex-fork-maintenance.md).
+
 ---
 
 ## ❤️ Sponsor

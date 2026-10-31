@@ -19,6 +19,8 @@
 
 </div>
 
+本 fork 自维护的 Codex 图片与 DeepSeek 兼容补丁、主线升级验收和回滚说明，见 [Codex 补丁维护文档](docs/zh/guides/codex-fork-maintenance.md)。
+
 ---
 
 ## ❤️ 赞助商

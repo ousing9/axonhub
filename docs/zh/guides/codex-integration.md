@@ -1,5 +1,7 @@
 # Codex 集成指南
 
+本 fork 的本地补丁、主线升级检查与回滚步骤，见 [Codex 补丁维护文档](codex-fork-maintenance.md)。
+
 ---
 
 ## 概览

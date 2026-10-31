@@ -1,5 +1,7 @@
 # Codex Integration Guide
 
+For this fork's local patches, upstream upgrade checks, and rollback procedure, see [Codex fork maintenance](codex-fork-maintenance.md).
+
 ---
 
 ## Overview
