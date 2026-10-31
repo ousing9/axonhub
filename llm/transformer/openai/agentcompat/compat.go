@@ -231,6 +231,18 @@ func RestoreResponse(body []byte, portable bool) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	// DeepSeek starts visible text as final_answer, then may change it to
+	// commentary at output_item.done when a tool call follows. Codex collapses
+	// earlier progress as soon as a final answer starts, causing a flicker.
+	// Keep streaming text provisional; the authoritative done phase still
+	// finalizes the message (and collapses a real final answer on completion).
+	if portable && text(v["type"]) == "response.output_item.added" {
+		item := object(v["item"])
+		if text(item["type"]) == "message" && text(item["role"]) == "assistant" && text(item["phase"]) == "final_answer" {
+			item["phase"] = "commentary"
+			changed = true
+		}
+	}
 	if !changed {
 		return body, nil
 	}

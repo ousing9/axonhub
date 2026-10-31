@@ -56,6 +56,13 @@ func TestPortableResponsesHistoryPipeline(t *testing.T) {
 						response := `{"id":"resp_test","object":"response","status":"completed","model":"deepseek-flash","output":[{"type":"message","id":"msg_test","role":"assistant","status":"completed","content":[{"type":"output_text","text":"OK"}]}],"usage":{"input_tokens":10,"output_tokens":1,"total_tokens":11}}`
 						if streaming {
 							w.Header().Set("Content-Type", "text/event-stream")
+							// DeepSeek marks both tool preambles and final answers as
+							// final_answer at start; only done carries the decided phase.
+							for _, phase := range []string{"commentary", "final_answer"} {
+								fmt.Fprintf(w, "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"id\":\"msg_%s\",\"phase\":\"final_answer\",\"content\":[]}}\n\n", phase)
+								fmt.Fprintf(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_%s\",\"delta\":\"OK\"}\n\n", phase)
+								fmt.Fprintf(w, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"id\":\"msg_%s\",\"phase\":\"%s\",\"content\":[{\"type\":\"output_text\",\"text\":\"OK\"}]}}\n\n", phase, phase)
+							}
 							fmt.Fprintf(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":%s}\n\n", response)
 						} else {
 							w.Header().Set("Content-Type", "application/json")
@@ -93,11 +100,29 @@ func TestPortableResponsesHistoryPipeline(t *testing.T) {
 					if streaming {
 						defer result.ChatCompletionStream.Close()
 						completed := false
+						var starts, ends, deltas []string
 						for result.ChatCompletionStream.Next() {
-							completed = completed || gjson.GetBytes(result.ChatCompletionStream.Current().Data, "type").String() == "response.completed"
+							event := gjson.ParseBytes(result.ChatCompletionStream.Current().Data)
+							switch event.Get("type").String() {
+							case "response.output_item.added":
+								starts = append(starts, event.Get("item.phase").String())
+							case "response.output_item.done":
+								ends = append(ends, event.Get("item.phase").String())
+							case "response.output_text.delta":
+								deltas = append(deltas, event.Get("delta").String())
+							case "response.completed":
+								completed = true
+							}
 						}
 						require.NoError(t, result.ChatCompletionStream.Err())
 						require.True(t, completed)
+						if enabled {
+							require.Equal(t, []string{"commentary", "commentary"}, starts)
+						} else {
+							require.Equal(t, []string{"final_answer", "final_answer"}, starts)
+						}
+						require.Equal(t, []string{"commentary", "final_answer"}, ends)
+						require.Equal(t, []string{"OK", "OK"}, deltas)
 					} else {
 						require.Contains(t, string(result.ChatCompletion.Body), "OK")
 					}

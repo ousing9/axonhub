@@ -9,6 +9,8 @@
 # Completed tool batches interrupted by system/developer guidance are kept contiguous;
 # guidance is retained after the batch. Ambiguous histories are left untouched.
 # Portable Responses passthrough also honors replaceDeveloperRoleWithSystem.
+# Portable streaming messages defer final_answer until item completion to avoid
+# DeepSeek's provisional final phase collapsing Codex progress before tool calls.
 # Startup configuration; changing these fields requires a service restart.
 codex_agent_compatibility:
   native_channel_ids: []  # GPT Responses passthrough channel IDs

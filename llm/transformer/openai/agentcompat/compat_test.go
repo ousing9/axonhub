@@ -81,3 +81,50 @@ func TestPlaintextHistoryAndInvalidAdapterCalls(t *testing.T) {
 		require.Error(t, err)
 	}
 }
+
+func TestPortableStreamingDefersFinalPhase(t *testing.T) {
+	// Captured DeepSeek sequence: a message starts final, but ends commentary
+	// immediately before a tool call. Final answers use the same start event.
+	start := []byte(`{"type":"response.output_item.added","sequence_number":9007199254740993,"output_index":1,"item":{"type":"message","role":"assistant","id":"msg_1","status":"in_progress","phase":"final_answer","content":[]}}`)
+	got, err := RestoreResponse(start, true)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"type":"response.output_item.added","sequence_number":9007199254740993,"output_index":1,"item":{"type":"message","role":"assistant","id":"msg_1","status":"in_progress","phase":"commentary","content":[]}}`, string(got))
+	again, err := RestoreResponse(got, true)
+	require.NoError(t, err)
+	require.Equal(t, got, again)
+	for _, phase := range []string{"commentary", "final_answer"} {
+		for _, body := range []string{
+			`{"type":"response.output_item.done","item":{"type":"message","role":"assistant","id":"msg_1","phase":"` + phase + `","content":[{"type":"output_text","text":"visible text"}]}}`,
+			`{"type":"response.completed","response":{"output":[{"type":"message","role":"assistant","phase":"` + phase + `"}]}}`,
+			`{"object":"response","output":[{"type":"message","role":"assistant","phase":"` + phase + `"}]}`,
+		} {
+			got, err := RestoreResponse([]byte(body), true)
+			require.NoError(t, err)
+			require.Equal(t, body, string(got), "completed phases and non-stream responses remain authoritative")
+		}
+	}
+	got, err = RestoreResponse(start, false)
+	require.NoError(t, err)
+	require.Equal(t, start, got, "native GPT must retain early final-answer rendering")
+}
+
+func TestPortablePhasePreservesOtherEvents(t *testing.T) {
+	for _, body := range []string{
+		`{"type":"response.output_text.delta","item_id":"msg_1","delta":"hello"}`,
+		`{"type":"response.output_item.added","item":{"type":"reasoning","phase":"final_answer"}}`,
+		`{"type":"response.output_item.added","item":{"type":"message","role":"user","phase":"final_answer"}}`,
+		`{"type":"response.output_item.added","item":{"type":"message","role":"assistant","phase":"partial_answer"}}`,
+		`{"type":"response.output_item.added","item":{"type":"message","role":"assistant"}}`,
+		`{"type":"response.output_item.added","item":{"type":"function_call","name":"probe","call_id":"c1","arguments":""}}`,
+		`{"type":"response.incomplete","response":{"status":"incomplete","output":[{"type":"message","role":"assistant","phase":"final_answer"}]}}`,
+		`{"type":"response.failed","response":{"error":{"message":"failure"}}}`,
+		`{"type":"error","message":"failure"}`,
+		`[DONE]`,
+	} {
+		got, err := RestoreResponse([]byte(body), true)
+		require.NoError(t, err)
+		require.Equal(t, body, string(got))
+	}
+	_, err := RestoreResponse([]byte(`{"type":`), true)
+	require.Error(t, err)
+}
