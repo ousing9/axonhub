@@ -4,7 +4,27 @@ This is the maintenance entry point for this fork's Codex patches. Use it during
 
 ## Baseline and patch inventory
 
-As of 2026-10-31, the maintenance branch is `codex/v2-portable-agents`, based on upstream `v1.0.0-beta11` (`b8bb3421`). The `upstream` remote points to `looplj/axonhub`; `origin` points to our fork, `ousing9/axonhub`. These four functional commits follow the baseline, in dependency order. They describe local patches, not features confirmed to be merged upstream. Later documentation commits are separate.
+As of 2026-10-31, the maintenance branch is `codex/v2-portable-agents`, based on upstream `v1.0.0-beta11` (`b8bb3421`). Locally maintained code is published to CNB, with these remote roles:
+
+| Remote | URL | Purpose |
+| --- | --- | --- |
+| `origin` | `https://cnb.cool/ousing9/axonhub` | Primary push destination for locally maintained code |
+| `upstream` | `https://github.com/looplj/axonhub.git` | Official releases and upstream updates |
+| `github` | `git@github.com:ousing9/axonhub.git` | Original personal GitHub fork, retained for explicit pushes when needed |
+
+The local repository sets `remote.pushDefault=origin`, and the maintenance branch tracks `origin/codex/v2-portable-agents`. Use `git push` for normal publication and `git fetch upstream --tags` for official updates. Pushing to CNB does not automatically synchronize GitHub. Git remote configuration is shared by worktrees of the same repository.
+
+For a fresh clone:
+
+```bash
+git clone --branch codex/v2-portable-agents https://cnb.cool/ousing9/axonhub
+cd axonhub
+git remote add upstream https://github.com/looplj/axonhub.git
+git remote add github git@github.com:ousing9/axonhub.git
+git config remote.pushDefault origin
+```
+
+These four functional commits follow the baseline, in dependency order. They describe local patches, not features confirmed to be merged upstream. Later documentation commits are separate.
 
 | Commit | Local capability and reason | Upgrade review focus |
 | --- | --- | --- |
