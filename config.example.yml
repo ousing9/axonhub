@@ -3,8 +3,10 @@
 # Copy this file to config.yml and modify as needed
 
 # Optional Codex V2 DeepSeek task transport (disabled by default).
-# Keeps native collaboration tools and appends three DeepSeek-only tools to
-# selected GPT Responses passthrough channels. Supported portable model: deepseek-flash.
+# Recommended: enable only portable_models for DeepSeek; leave both native lists empty.
+# Optional GPT -> DeepSeek tool injection requires BOTH a client model alias in
+# native_models (matched before model mapping) and a channel in native_channel_ids.
+# Route the dedicated alias via existing model mappings; ordinary GPT names stay out.
 # Portable inputs are normalized before protocol conversion, including Chat channels.
 # Completed tool batches interrupted by system/developer guidance are kept contiguous;
 # guidance is retained after the batch. Ambiguous histories are left untouched.
@@ -13,7 +15,8 @@
 # DeepSeek's provisional final phase collapsing Codex progress before tool calls.
 # Startup configuration; changing these fields requires a service restart.
 codex_agent_compatibility:
-  native_channel_ids: []  # GPT Responses passthrough channel IDs
+  native_models: []       # Optional dedicated alias, e.g. ["gpt-6-astra-deepseek"]
+  native_channel_ids: []  # Also required for native adaptation; channel IDs alone do nothing
   portable_models: []     # Enable with ["deepseek-flash"]
 
 # Server configuration

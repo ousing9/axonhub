@@ -206,3 +206,137 @@ func TestAgentCompatibilityPortablePipeline(t *testing.T) {
 		})
 	}
 }
+
+// Both client names route to the same provider model. Only the explicitly
+// selected mixed-agent alias may change the tool catalog or restore tool names.
+func TestNativeAgentCompatibilityScopePipeline(t *testing.T) {
+	const model = "gpt-6-astra"
+	const alias = "gpt-6-astra-deepseek"
+	const input = `[{"type":"message","role":"developer","content":"stable guidance"},{"type":"agent_message","content":[{"type":"encrypted_content","encrypted_content":"opaque-task"}]},{"type":"function_call","call_id":"old","namespace":"collaboration","name":"spawn_agent","arguments":"{\"message\":\"gAAAAciphertext\"}","encrypted_function_args":["message"]},{"type":"function_call_output","call_id":"old","output":"ok"}]`
+	const catalog = `[{"type":"namespace","name":"collaboration","tools":[{"type":"function","name":"spawn_agent","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true}}}},{"type":"function","name":"send_message","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true}}}},{"type":"function","name":"followup_task","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true}}}}]}]`
+	const opaque = `{"type":"function_call","id":"fc_native","call_id":"native","namespace":"collaboration","name":"spawn_agent","arguments":"{\"message\":\"gAAAAciphertext\"}","encrypted_function_args":["message"]}`
+	const adapter = `{"type":"function_call","id":"fc_ds","call_id":"ds","namespace":"axonhub_v2","name":"dispatch_task","arguments":"{\"model\":\"deepseek-flash\",\"message\":\"task\"}"}`
+	const message = `{"type":"message","id":"msg","role":"assistant","phase":"final_answer","status":"completed","content":[{"type":"output_text","text":"OK"}]}`
+	for _, streaming := range []bool{false, true} {
+		for _, tc := range []struct {
+			name         string
+			clientModel  string
+			nativeModels []string
+			channel      bool
+			active       bool
+		}{
+			{name: "DeepSeek only", clientModel: model},
+			{name: "ordinary GPT on enabled channel", clientModel: model, nativeModels: []string{alias}, channel: true},
+			{name: "legacy channel only", clientModel: alias, channel: true},
+			{name: "model only", clientModel: alias, nativeModels: []string{alias}},
+			{name: "mapped model cannot opt in", clientModel: alias, nativeModels: []string{model}, channel: true},
+			{name: "explicit mixed alias", clientModel: alias, nativeModels: []string{alias}, channel: true, active: true},
+		} {
+			t.Run(fmt.Sprintf("stream=%t/%s", streaming, tc.name), func(t *testing.T) {
+				captured := make(chan []byte, 1)
+				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					body, err := io.ReadAll(r.Body)
+					if err != nil {
+						http.Error(w, "read failed", 400)
+						return
+					}
+					captured <- body
+					response := fmt.Sprintf(`{"id":"resp_scope","object":"response","status":"completed","model":%q,"output":[%s,%s,%s],"usage":{"input_tokens":10,"output_tokens":3,"total_tokens":13}}`, model, opaque, adapter, message)
+					if !streaming {
+						w.Header().Set("Content-Type", "application/json")
+						fmt.Fprint(w, response)
+						return
+					}
+					w.Header().Set("Content-Type", "text/event-stream")
+					for i, item := range []string{opaque, adapter, message} {
+						for _, kind := range []string{"added", "done"} {
+							fmt.Fprintf(w, "event: response.output_item.%s\ndata: {\"type\":\"response.output_item.%s\",\"output_index\":%d,\"item\":%s}\n\n", kind, kind, i, item)
+						}
+					}
+					fmt.Fprintf(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":%s}\n\n", response)
+				}))
+				defer upstream.Close()
+				client := enttest.NewEntClient(t, "sqlite3", "file:"+t.Name()+"?mode=memory&_fk=0")
+				defer client.Close()
+				ctx := ent.NewContext(authz.WithTestBypass(t.Context()), client)
+				project := createTestProject(t, ctx, client)
+				ch, err := client.Channel.Create().SetType(channel.TypeOpenaiResponses).SetName("GPT scope test").
+					SetBaseURL(upstream.URL + "/v1").SetCredentials(objects.ChannelCredentials{APIKey: "test-key"}).
+					SetSettings(&objects.ChannelSettings{PassThroughBody: new(true), ModelMappings: []objects.ModelMapping{{From: alias, To: model}}}).
+					SetSupportedModels([]string{model}).SetDefaultTestModel(model).Save(ctx)
+				require.NoError(t, err)
+				outbound, err := responses.NewOutboundTransformer(ch.BaseURL, ch.Credentials.APIKey)
+				require.NoError(t, err)
+				channelService, requestService, systemService, usageLogService := setupTestServices(t, client)
+				cfg := AgentCompatibilityConfig{NativeModels: tc.nativeModels, PortableModels: []string{"deepseek-flash"}}
+				if tc.channel {
+					cfg.NativeChannelIDs = []int{ch.ID}
+				}
+				o := (&ChatCompletionOrchestrator{
+					channelSelector: &staticChannelSelector{candidates: channelsToTestCandidates([]*biz.Channel{{Channel: ch, Outbound: outbound}}, tc.clientModel)},
+					Inbound:         responses.NewInboundTransformer(), RequestService: requestService,
+					ChannelService: channelService, PromptProvider: &stubPromptProvider{},
+					SystemService: systemService, UsageLogService: usageLogService,
+					PipelineFactory: pipeline.NewFactory(httpclient.NewHttpClientWithClient(upstream.Client())),
+					ModelMapper:     NewModelMapper(), channelLimiterManager: NewChannelLimiterManager(),
+				}).WithAgentCompatibility(cfg)
+				ctx = shared.WithResponsesAPI(contexts.WithProjectID(ctx, project.ID))
+				body := fmt.Sprintf(`{"model":%q,"stream":%t,"input":%s,"tools":%s}`, tc.clientModel, streaming, input, catalog)
+				result, err := o.Process(ctx, &httpclient.Request{Method: "POST", URL: "/v1/responses", Body: []byte(body)})
+				require.NoError(t, err)
+				got := <-captured
+				require.Equal(t, model, gjson.GetBytes(got, "model").String())
+				if tc.active {
+					require.JSONEq(t, input, gjson.GetBytes(got, "input").Raw)
+				} else {
+					require.Equal(t, input, gjson.GetBytes(got, "input").Raw, "history and encrypted fields must stay byte-identical")
+				}
+				tools := gjson.GetBytes(got, "tools").Array()
+				require.JSONEq(t, gjson.Parse(catalog).Array()[0].Raw, tools[0].Raw)
+				if tc.active {
+					require.Len(t, tools, 2)
+					require.Equal(t, "axonhub_v2", tools[1].Get("name").String())
+				} else {
+					require.Equal(t, catalog, gjson.GetBytes(got, "tools").Raw)
+				}
+				checkItem := func(item gjson.Result) {
+					switch item.Get("id").String() {
+					case "fc_native":
+						require.JSONEq(t, opaque, item.Raw)
+					case "fc_ds":
+						if tc.active {
+							require.Equal(t, "collaboration", item.Get("namespace").String())
+							require.Equal(t, "spawn_agent", item.Get("name").String())
+							require.Equal(t, "[]", item.Get("encrypted_function_args").Raw)
+						} else {
+							require.JSONEq(t, adapter, item.Raw)
+						}
+					case "msg":
+						require.JSONEq(t, message, item.Raw, "GPT final phase must not be rewritten")
+					default:
+						t.Fatalf("unexpected item: %s", item.Raw)
+					}
+				}
+				if !streaming {
+					items := gjson.GetBytes(result.ChatCompletion.Body, "output").Array()
+					require.Len(t, items, 3)
+					for _, item := range items {
+						checkItem(item)
+					}
+					return
+				}
+				defer result.ChatCompletionStream.Close()
+				var count int
+				for result.ChatCompletionStream.Next() {
+					event := gjson.ParseBytes(result.ChatCompletionStream.Current().Data)
+					if event.Get("item").Exists() {
+						checkItem(event.Get("item"))
+						count++
+					}
+				}
+				require.NoError(t, result.ChatCompletionStream.Err())
+				require.Equal(t, 6, count)
+			})
+		}
+	}
+}

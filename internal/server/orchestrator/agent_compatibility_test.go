@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"net/http"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -25,7 +26,7 @@ func compatibilityTestState() (*agentCompatibilityMiddleware, *PersistenceState)
 		LlmRequest:         &llm.Request{APIFormat: llm.APIFormatOpenAIResponse},
 		RawProviderRequest: &httpclient.Request{APIFormat: string(llm.APIFormatOpenAIResponse)},
 	}
-	return &agentCompatibilityMiddleware{outbound: &PersistentOutboundTransformer{state: state}, config: AgentCompatibilityConfig{NativeChannelIDs: []int{36}, PortableModels: []string{"deepseek-flash"}}}, state
+	return &agentCompatibilityMiddleware{outbound: &PersistentOutboundTransformer{state: state}, native: true, config: AgentCompatibilityConfig{NativeModels: []string{"gpt-6-astra-deepseek"}, NativeChannelIDs: []int{36}, PortableModels: []string{"deepseek-flash"}}}, state
 }
 
 func TestPortablePassthroughHonorsRoleOption(t *testing.T) {
@@ -168,4 +169,28 @@ func TestAgentCompatibilityPortableModelScope(t *testing.T) {
 		require.False(t, active)
 		require.Same(t, req, got)
 	}
+}
+
+func TestNativeAgentCompatibilityBypass(t *testing.T) {
+	m, state := compatibilityTestState()
+	m.native = false                 // Ordinary GPT, even on an allowlisted passthrough channel.
+	state.PassThroughApplied = false // Bypass must not impose new passthrough requirements.
+	req := &httpclient.Request{APIFormat: string(llm.APIFormatOpenAIResponse), Body: []byte("not parsed"), Headers: http.Header{"Content-Length": {"10"}}}
+	got, err := m.prepareRequest(t.Context(), req)
+	require.NoError(t, err)
+	require.Same(t, req, got)
+	require.Equal(t, "not parsed", string(got.Body))
+	require.Equal(t, "10", got.Headers.Get("Content-Length"))
+	require.False(t, m.active)
+	for _, status := range []int{200, 400, 500} {
+		resp := &httpclient.Response{StatusCode: status, Body: []byte("not parsed")}
+		got, err := m.OnOutboundRawResponse(t.Context(), resp)
+		require.NoError(t, err)
+		require.Same(t, resp, got)
+	}
+	stream := streams.SliceStream([]*httpclient.StreamEvent{{Data: []byte("not parsed")}})
+	defer stream.Close()
+	gotStream, err := m.OnOutboundRawStream(t.Context(), stream)
+	require.NoError(t, err)
+	require.Same(t, stream, gotStream)
 }
