@@ -4,7 +4,7 @@ This is the maintenance entry point for this fork's Codex patches. Use it during
 
 ## Baseline and patch inventory
 
-As of 2026-10-31, the maintenance branch is `codex/v2-portable-agents`, based on upstream `v1.0.0-beta11` (`b8bb3421`). Locally maintained code is published to the personal GitHub fork, with these remote roles:
+As of 2026-11-02, the maintenance branch is `codex/v2-portable-agents`, based on upstream `v1.0.0-beta11` (`b8bb3421`). Production was rolled back to the image-only patch `d798dc63` after a GPT cache regression. Cache repair `c18afe61` passed isolated acceptance and is not deployed. Locally maintained code is published to the personal GitHub fork, with these remote roles:
 
 | Remote | URL | Purpose |
 | --- | --- | --- |
@@ -22,7 +22,7 @@ git remote add upstream https://github.com/looplj/axonhub.git
 git config remote.pushDefault origin
 ```
 
-These four functional commits follow the baseline, in dependency order. They describe local patches, not features confirmed to be merged upstream. Later documentation commits are separate.
+These five functional commits follow the baseline, in dependency order. They describe local patches, not features confirmed to be merged upstream. Later documentation commits are separate.
 
 | Commit | Local capability and reason | Upgrade review focus |
 | --- | --- | --- |
@@ -30,6 +30,7 @@ These four functional commits follow the baseline, in dependency order. They des
 | `dc8e9d56` | Adapt plaintext tasks for DeepSeek, which cannot consume Codex V2 encrypted task arguments, while retaining native subagent lifecycle | Tool catalog, `agent_message` input, restored call names, `encrypted_function_args` marker, configuration wiring |
 | `06c35032` | Repair DeepSeek tool histories interrupted by path guidance and prevent passthrough from undoing developer-to-system replacement | History assembly and conversion order, complete tool-batch pairing, final outbound role replacement |
 | `3e82c921` | Prevent Codex progress from collapsing and reopening when DeepSeek starts a message as final and finishes it as commentary | Provisional phase in `output_item.added` and authoritative phase in `output_item.done` |
+| `c18afe61` | Fix the connection/cache regression introduced by `dc8e9d56` appending transient guidance to GPT history; keep guidance in the stable tool description | Multi-turn WebSocket handshakes, `previous_response_id`, incremental input, and actual cached-token growth |
 
 Inspect the complete local delta with:
 
@@ -58,6 +59,8 @@ codex_agent_compatibility:
 Channel IDs are instance-specific; do not copy them from another database. Configuration is loaded at startup. The currently supported portable model is `deepseek-flash`; validate protocol behavior before adding another model.
 
 On the GPT task-producing side, native `collaboration` tools remain available. Three additional DeepSeek-only tools, `axonhub_v2.dispatch_task`, `deliver_message`, and `continue_task`, are mapped back to native collaboration calls on response. `encrypted_function_args: []` explicitly marks plaintext arguments. This convention was validated with Codex 0.166 and needs review when Codex changes. The adapter does not alter authorization, subagent lifecycle, or encrypted GPT task behavior, and cannot decrypt existing opaque DeepSeek tasks.
+
+Routing guidance belongs in the stable `axonhub_v2` namespace description. Do not append client-invisible messages to history on every request. Functional tool acceptance does not establish history-prefix or cache continuity; verify these separately.
 
 Portable input adaptation runs after Responses history assembly and before protocol conversion so the parser does not discard `agent_message`. Portable response adaptation runs after conversion back to the client protocol; native GPT tool adaptation runs on the outbound response side. Preserve those ordering relationships during upgrades.
 
@@ -94,6 +97,26 @@ In portable mode only, `RestoreResponse` changes `final_answer` to `commentary` 
 
 The tradeoff is that a real DeepSeek final answer triggers collapse after its text finishes. Matching GPT's collapse-at-start behavior requires the upstream API to distinguish commentary from final answers reliably at message start. Permanently marking every message as commentary would also prevent proper final-answer collapsing and is not an equivalent repair.
 
+### GPT cache regression and repair
+
+`dc8e9d56` appended transient developer guidance to each GPT request. The next client history did not contain that message, so the previous upstream input plus output was no longer a prefix of the new request. `responses/websocket_executor.go` consequently dropped `previous_response_id`, reconnected, and sent full context. This affected GPT channels with native adaptation enabled even when no DeepSeek tool was actually called. This investigation did not identify a problem with DeepSeek's own cache.
+
+The November 2 investigation found prefix breaks at this guidance item and new handshakes in all 15 sampled adjacent production request pairs. Channel switching after quota exhaustion added cold starts. Earlier functional acceptance missed the regression because it did not test connection and cache continuity.
+
+`c18afe61` moves the complete guidance into the stable tool description and removes the appended message. The new `responses/agent_compatibility_test.go` connects the adapter to the real WebSocket executor. Both top-level tools and additional_tools catalogs reuse one connection across four rounds, sending only new tool results. Cases include ordinary tools, DeepSeek plaintext call-name round trips, and encrypted GPT arguments. Editing earlier history still reconnects correctly. Running the test against the old implementation fails reliably on the second round.
+
+Isolated acceptance called the official upstream directly with `gpt-6-astra` and separate sessions, without passing through production AxonHub. Each group had four rounds with added synthetic data:
+
+| Mode | Handshakes across four rounds | Final-round input / cached tokens | Final-round hit rate |
+| --- | --- | --- | --- |
+| No adaptation | 1 | 9,518 / 7,680 | 80.7% |
+| Old adaptation | 4 | 10,501 / 6,912 | 65.8% |
+| Repaired adaptation | 1 | 10,423 / 8,576 | 82.3% |
+
+The repaired path returned 5,376, 6,912, and 8,576 cached tokens in rounds two through four. A separate live tool-selection probe chose `axonhub_v2.dispatch_task` from the tool description; no child was executed. These observations demonstrate restored connection continuity and better caching in the sample, not a fixed production hit-rate guarantee. New input, channel/account switching, model changes, and tool-catalog changes still affect caching. The full live subagent lifecycle has not been rerun after this repair and remains a pre-deployment acceptance item.
+
+Sanitized acceptance and drivers are saved under `~/.local/state/axonhub-tests/20261102-gpt-cache-c18afe61/`; temporary credentials were deleted. Track source repairs separately from deployment state: the running service remains on the rollback version.
+
 ## Following upstream releases
 
 1. Record the current source commit, image, configuration, and acceptance results; retain a rollback branch or tag. After `git fetch upstream --tags`, choose a target version and read its release/migration notes. The current patch inventory does not prove the target version still lacks these capabilities.
@@ -117,6 +140,7 @@ go test ./transformer/openai/agentcompat ./transformer/openai/responses ./transf
 | Scenario | Expected behavior |
 | --- | --- |
 | Compatibility disabled; ordinary GPT | Existing tool catalog, encrypted arguments, and stream phases remain unchanged |
+| GPT native adaptation enabled across multiple tool rounds | One WebSocket, correct previous_response_id and incremental input; cached tokens grow with reusable history; genuine history edits reconnect |
 | DeepSeek main agent | Multiple tool rounds, actual result writes, and read-back verification succeed |
 | GPT parent → DeepSeek child | Initial task, same-child messaging, and follow-up work; GPT children still work |
 | Developer/system guidance between calls | Complete batches continue; genuinely missing results still fail without fabricated output |
@@ -139,16 +163,12 @@ Current release record:
 
 | Item | Value |
 | --- | --- |
-| Backend functional commit | `3e82c921` |
-| Current image | `axonhub-local:v1.0.0-beta11-native-images-codex-v2-phase-3e82c921` |
-| Previous image | `axonhub-local:v1.0.0-beta11-native-images-codex-v2-history-06c35032` |
-| Release directory | `deployments/20261031-deepseek-phase-3e82c921/` |
-| Acceptance | Relevant offline packages and full orchestrator tests passed; direct gateway DeepSeek two-round streaming/GPT comparison and real DeepSeek main agent passed; desktop visual confirmation pending |
+| Running source commit | `d798dc63`, image fix only |
+| Current image | `axonhub-local:v1.0.0-beta11-native-images` |
+| Withdrawn image | `axonhub-local:v1.0.0-beta11-native-images-codex-v2-phase-3e82c921` |
+| Rollback record directory | `deployments/20261102-150907-rollback-native-images/` |
+| Candidate repair | `c18afe61`, not deployed; relevant offline packages, full orchestrator, and direct official upstream cache comparison passed |
 
-Use a new image tag for each release, back up Compose, and record the source version and binary hash. Run direct gateway acceptance after the service becomes healthy, then update this table. The current release's `rollback.py` verifies the post-deployment Compose hash before restoring the previous Compose file and recreating the `axonhub` service:
+Use a new image tag for each release, back up Compose, and record the source version and binary hash. Run direct gateway acceptance after the service becomes healthy, then update this table. Each deployment's `rollback.py` verifies its post-deployment Compose hash before restoring that directory's previous Compose file and recreating the `axonhub` service. Check the restoration direction before execution: the November 2 rollback directory preserves the withdrawn compatibility version, so its script would restore that version rather than the current healthy baseline.
 
-```bash
-python3 ~/axonhub/deployments/20261031-deepseek-phase-3e82c921/rollback.py
-```
-
-If Compose has changed since deployment, the script stops so those changes can be compared rather than overwritten. This phase patch has no database migration. For future upstream upgrades, evaluate database backups and migration rollback separately; switching to an older image does not roll back the database.
+If Compose has changed since deployment, the script stops so those changes can be compared rather than overwritten. These compatibility patches have no database migration. For future upstream upgrades, evaluate database backups and migration rollback separately; switching to an older image does not roll back the database.
