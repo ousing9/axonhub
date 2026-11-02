@@ -4,7 +4,7 @@
 
 ## 基线与补丁清单
 
-截至 2026-11-02，维护分支为 `codex/v2-portable-agents`，基于上游 `v1.0.0-beta11`（`b8bb3421`）。生产已因 GPT 缓存回归退回仅含图片修复的 `d798dc63`；缓存修复 `c18afe61` 已完成隔离验收，作用范围收紧 `33069930` 已通过离线回归，均未部署。自维护代码发布到个人 GitHub fork，远端分工如下：
+截至 2026-11-02，维护分支为 `codex/v2-portable-agents`，基于上游 `v1.0.0-beta11`（`b8bb3421`）。生产已因 GPT 缓存回归退回仅含图片修复的 `d798dc63`；缓存修复 `c18afe61` 与普通模型名混合代理方案已完成隔离验收，均未部署。专用模型入口限制 `33069930` 已撤销。自维护代码发布到个人 GitHub fork，远端分工如下：
 
 | Remote | 地址 | 用途 |
 | --- | --- | --- |
@@ -22,7 +22,7 @@ git remote add upstream https://github.com/looplj/axonhub.git
 git config remote.pushDefault origin
 ```
 
-以下是基线之后的六个功能提交，按依赖顺序排列；它们不代表上游已合入的功能。后续文档提交另计。
+以下是当前维护的主要功能补丁，按依赖顺序排列；历史提交与当前生效行为应分开看。它们不代表上游已合入的功能。
 
 | 提交 | 自维护能力与原因 | 升级时重点检查 |
 | --- | --- | --- |
@@ -31,7 +31,7 @@ git config remote.pushDefault origin
 | `06c35032` | DeepSeek 工具历史被路径指导消息打断时会误报缺少工具结果；同时修复透传覆盖 developer→system 配置的问题 | 历史组装与协议转换的顺序、完整工具批次配对、最终出站角色替换 |
 | `3e82c921` | DeepSeek 流式消息先标记 final，结束时可能改成 commentary，导致 Codex 前文先折叠后展开 | `output_item.added` 的临时阶段与 `output_item.done` 的最终阶段 |
 | `c18afe61` | 修复 `dc8e9d56` 在 GPT 历史末尾注入临时指导导致的连接复用和缓存回归；将指导保留在固定工具描述中 | 多轮真实 WebSocket 握手数、`previous_response_id` 与增量输入、实际缓存 token 增长 |
-| `33069930` | 默认单独适配 DeepSeek；GPT 混合入口同时要求客户端模型名和通道白名单，旧通道配置单独不生效 | 映射前匹配、普通 GPT 字段保真、旧配置迁移、通道重试范围 |
+| `09938648` | 撤销专用 GPT 模型别名限制，普通模型名支持原生混合代理；增加完整 Process 管线的真实对照验收 | 固定工具描述、既有输入前缀、DeepSeek 双向消息与同一代理 follow-up、GPT 子代理及缓存对照 |
 
 可在本地查看完整差异：
 
@@ -49,31 +49,21 @@ git show <commit>
 
 ### DeepSeek V2 任务适配
 
-推荐只开启 DeepSeek 消费侧适配，两个 native 列表保持为空。所有列表为空时完全关闭：
+混合模式保留客户端原来的 GPT 模型名，继续由 Codex 管理子代理。只需在 AxonHub 显式选择 GPT Responses 透传通道和 DeepSeek 模型，不需要专用模型别名：
 
 ```yaml
 codex_agent_compatibility:
-  native_models: []
-  native_channel_ids: []
+  native_channel_ids: [36]  # 示例：替换为本实例用于 GPT 的 Responses 透传通道 ID
   portable_models: ["deepseek-flash"]
 ```
 
-`portable_models` 精确匹配客户端传入的模型名，在任何模型映射之前判断。上述配置仅处理 DeepSeek 的任务输入、工具历史和流式阶段；普通 GPT 的工具目录、输入历史、加密字段及响应阶段均绕过本适配器。DeepSeek 可以作为主 agent 使用，也可以消费已有的明文子任务；这不解决 GPT 原生调用生成加密 DeepSeek 任务的问题。
+`native_channel_ids` 控制 GPT 侧固定任务工具扩展，重试或切换通道时重新检查通道白名单。用户照常选择 `gpt-6-astra` 等已有模型。模型侧使用 DeepSeek 专用明文工具后，网关把调用恢复为 Codex 原生 `spawn_agent`、`send_message`、`followup_task`；GPT 子代理继续使用原来的加密工具。这个过程不创建独立 Broker 或第二套代理生命周期。
 
-需要 GPT→DeepSeek 混合子 agent 时，显式选择专用入口：
+GPT 侧会增加固定的工具定义和描述，因此输入 token 与完全关闭适配时不完全相同。指导不再作为每轮隐藏消息追加到历史末尾。升级验收必须同时检查多轮连接复用、`previous_response_id`、缓存 token 和真实父子代理往返；不能仅检查工具是否被调用。
 
-```yaml
-codex_agent_compatibility:
-  portable_models: ["deepseek-flash"]
-  native_models: ["gpt-6-astra-deepseek"]
-  native_channel_ids: [36]  # 示例，必须替换为本实例的 GPT Responses 透传渠道 ID
-```
+`portable_models` 精确匹配客户端传入的模型名，在模型映射之前判断。任务消息转换、工具历史整理、透传角色修复和流式阶段修复只应用于选中的 DeepSeek 请求，不应用于 GPT。单独使用 DeepSeek 主 agent 时可将 `native_channel_ids` 留空，但 GPT→DeepSeek 的混合任务仍需要 GPT 侧明文工具扩展。
 
-通过 AxonHub 既有模型映射把 `gpt-6-astra-deepseek` 指向真实 GPT 模型，并在客户端显式选择该别名。配置白名单不会自动创建模型路由或客户端模型条目。native 适配要求**原始客户端模型名与当前通道同时命中**；API key 配置映射和通道模型映射不改变已确定的模型资格，重试或切换通道则重新检查通道白名单。普通 `gpt-6-astra` 即使走同一通道、同一上游模型，也不会注入工具。专用入口会改变工具目录，应单独验收缓存连续性。
-
-**旧配置迁移：仅保留 `native_channel_ids` 不再启用 GPT 侧适配。** `native_models` 缺失或为空时默认跳过。需要恢复混合模式时，补齐专用别名、路由和客户端选择；推荐的 DeepSeek 单独适配模式不需要这些设置。不要把日常 GPT 模型名加入 native 白名单，否则会再次扩大作用范围。
-
-通道 ID 来自当前实例，不能照抄另一套数据库。配置在启动时加载。当前支持的 portable 模型为 `deepseek-flash`；添加其他模型前应单独验证协议行为。以上是候选源码的配置说明，本次未修改运行中的配置或重启服务。
+通道 ID 来自当前实例，不能照抄另一套数据库。配置在启动时加载；所有列表为空时关闭适配。当前支持的 portable 模型为 `deepseek-flash`，添加其他模型前应单独验证协议行为。曾引入的 `native_models` 配置已撤销，请从候选配置中移除；它不是运行本方案的条件。生产仍保持回退版本，以上配置尚未部署。
 
 GPT 生产任务一侧保留 `collaboration`，另加 `axonhub_v2.dispatch_task`、`deliver_message`、`continue_task` 三个工具，只用于 DeepSeek。返回时映射回原生 collaboration 调用，并用 `encrypted_function_args: []` 明确表示明文参数。该约定已按 Codex 0.166 验证，Codex 升级时需要复查。它不改变授权、子 agent 生命周期或 GPT 的加密任务行为；既有不透明的加密 DeepSeek 任务也不会被解密。
 
@@ -130,19 +120,37 @@ call A → call B → output A → output B → 原指导
 | 旧适配 | 4 | 10,501 / 6,912 | 65.8% |
 | 修复后 | 1 | 10,423 / 8,576 | 82.3% |
 
-修复版第二至四轮缓存 token 为 5,376、6,912、8,576。另一次真实工具选择验证中，模型仅凭工具描述选中了 `axonhub_v2.dispatch_task`，没有执行子 agent。这些结果证明了连接连续性恢复和样本中的缓存改善，不承诺生产固定命中率；每轮新增输入、渠道/账号切换、模型及工具目录变化仍会影响缓存。完整真实子 agent 生命周期尚未在本次修复后重跑，上线前仍需验收。
+修复版第二至四轮缓存 token 为 5,376、6,912、8,576。另一次真实工具选择验证中，模型仅凭工具描述选中了 `axonhub_v2.dispatch_task`，没有执行子 agent。这些结果证明了连接连续性恢复和样本中的缓存改善，不承诺生产固定命中率；每轮新增输入、渠道/账号切换、模型及工具目录变化仍会影响缓存。真实子 agent 生命周期由下述完整管线验收覆盖。
 
-`33069930` 进一步收紧默认影响范围。离线完整 `conf`、`orchestrator` 和上述三个 LLM 包均通过；新增完整 Process 测试覆盖流式/非流式下的 DeepSeek 单独启用、普通 GPT 同通道、旧通道配置、仅模型配置、映射后命中及专用别名双重命中。绕过测试还检查请求头、原响应/流对象和错误响应。此次未调用真实上游，专用入口的完整真实子 agent 生命周期仍待隔离验收。
+专用模型入口限制 `33069930` 已撤销。普通模型名混合调用采用原有通道白名单，保留 `c18afe61` 的固定描述修复。
 
-脱敏验收与测试驱动保存在 `~/.local/state/axonhub-tests/20261102-gpt-cache-c18afe61/`；临时凭据已删除。源码修复与生产部署状态应分开记录，当前运行服务保持回退版本。
+新增 `TestLiveAgentCompatibilityIsolated` 通过实际 `Process` 管线、内存数据库、独立 Codex 配置和固定的官方 GPT/DeepSeek 上游验收。它不经过生产网关，也不读取生产数据库或个人 Codex 配置；凭据和模型目录由调用者显式提供。测试检查 GPT 连续出站请求保留既有输入前缀、DeepSeek 首次任务、补发消息、同一代理 follow-up、子代理生成的随机 nonce 回传、原生 GPT 子代理，以及 GPT WebSocket 握手次数和缓存用量。
+
+真实 CLI 的连接行为需要单独说明：Codex 0.166.0 回传历史时会改变 `metadata`、`internal_chat_message_metadata_passthrough`，部分 reasoning 项还改变 `content`。当前 AxonHub 严格比较前缀，因此真实 CLI 仍会重连；关闭全部 native 适配的纯 GPT 对照也复现了同样差异。本次没有修改 GPT 的通用传输或前缀比较。上面的“一条连接”结论适用于受控、前缀稳定的测试，不能推广到真实 CLI 的所有消息形态。真实验收记录握手数，并比较首轮之后 GPT 主代理的缓存 token；5 个百分点的差异是测试回归阈值，不是生产命中率承诺。
+
+2026-11-02 的完整管线样本（Codex 0.166.0，主模型 `gpt-6-astra`）如下。命中率按主代理首轮之后各轮的缓存 token 总和 / 输入 token 总和计算：
+
+| 对照轮次 | 纯 GPT 基线 | GPT + DeepSeek | 结果 |
+| --- | --- | --- | --- |
+| 首次完整对照 | 98.50% | 83.28% | 功能通过；混合组末轮缓存为 0，缓存门禁失败 |
+| 带请求诊断的独立复测 | 98.33% | 98.38% | 功能与缓存门禁通过；出站旧输入及其他顶层字段均稳定 |
+| 最终代码复测 | 85.70% | 98.21% | 功能、真实请求前缀及缓存门禁通过；纯 GPT 基线也出现单轮 0 缓存 |
+
+单轮缓存为 0 的根因尚未确定；关闭适配的最终纯 GPT 对照也复现了这一现象，因此不能把它简单归因于 DeepSeek 适配。后续成功样本不抹去首次失败记录。诊断复测中，纯 GPT 主代理 9 轮/9 次握手，混合组 10 轮/10 次握手；重连没有自动等同于缓存未命中。保留真实前缀检查、缓存对照和上游异常记录，升级时继续复核。
+
+完整管线验收报告保存在 `~/.local/state/axonhub-tests/20261102-native-mixed/` 的 `acceptance*` 目录，基线关闭 native 适配并使用 GPT 子代理，混合组启用固定工具并将首个子代理换成 DeepSeek，两组执行相同的任务与消息流程。`context canceled` 只有在下游 HTTP 请求确实取消且错误也是取消时记为客户端中断；其他错误及上游失败事件仍使测试失败。消息打断后的继续执行、同一目标 follow-up 和 nonce 回传均需通过，不能因出现取消就跳过功能检查。
+
+脱敏验收与测试驱动保存在 `~/.local/state/axonhub-tests/20261102-gpt-cache-c18afe61/`；两批测试的临时凭据均已删除。源码修复与生产部署状态应分开记录，当前运行服务保持回退版本。
 
 ## 跟随上游升级
 
 1. 记录当前源码提交、镜像、配置及验收结果；保留可回退的分支或标签。`git fetch upstream --tags` 后选择目标版本，阅读其迁移与发布说明，不把当前补丁数量当作目标版本仍缺失功能的证据。
-2. 在升级分支上比较目标版本与上述五项补丁。逐项判断上游是否已有等价行为；仍需要的补丁按表中顺序移植。处理冲突时重点核对历史组装、中间件先后、透传和流式完成事件，不能仅以编译通过认定语义一致。
+2. 在升级分支上比较目标版本与上述各项补丁。逐项判断上游是否已有等价行为；仍需要的补丁按表中顺序移植。处理冲突时重点核对历史组装、中间件先后、透传和流式完成事件，不能仅以编译通过认定语义一致。
 3. 对已被上游覆盖的补丁，在移除本地实现后运行同一套行为验收。工具历史整理与角色替换、阶段修复各自独立判断，不因某一项修复就整包删除。
 4. 更新本文的基线、提交映射、行为差异和部署记录。同步中英文版本；保留回归用例，以便后续发现主线回退。
 5. 完成离线回归、隔离实例真实验收，再构建和部署。上游升级可能涉及前端、依赖和数据库；应按目标版本构建完整镜像。此次仅换后端二进制、复用旧镜像前端的方式只适用于相同主线基线且前端未变的补丁发布。
+
+2026-11-02 核查的上游 `unstable` 为 `aa3a265ddc1a7bb0787d56020a1aa77d8ec0e036`。其中工具输出排序修复 [#2633](https://github.com/looplj/axonhub/pull/2633) 作用于 Responses→Chat 转换，尚不能替代本方案的加密任务参数与 `agent_message` 处理。该版本仍使用严格 WebSocket 输入前缀比较。此结论对应该提交，未来应重新核查。
 
 补丁退休依据应是目标版本实际通过原始失败场景，而非 PR 标题相似。工具输出协议转换问题与原生 Responses 透传历史问题可能发生在不同路径。可参考 [DeepSeek Responses 文档](https://api-docs.deepseek.com/guides/responses_api/)、[工具历史兼容报告](https://github.com/deepseek-ai/awesome-deepseek-integration/issues/740)；阶段字段相关的社区报告见 [OpenCode #57372](https://github.com/anomalyco/opencode/issues/57372)，其中“缺少 phase”与本 fork 实测“开始/结束 phase 不一致”需分别判断。
 
@@ -159,9 +167,9 @@ go test ./transformer/openai/agentcompat ./transformer/openai/responses ./transf
 | 场景 | 应观察到的结果 |
 | --- | --- |
 | 未开启适配或只开启 DeepSeek；普通 GPT | 工具目录、加密参数和流式阶段维持原行为 |
-| GPT 开启 native 适配，连续多轮工具调用 | 一条 WebSocket、正确的 previous_response_id 与新增输入；缓存 token 随可复用历史增长；修改历史应重连 |
-| 普通 GPT 与混合专用别名走同一上游模型/通道 | 仅双重白名单命中的别名注入工具；普通 GPT 输入与工具目录逐字节保留，加密响应及 final 阶段不变 |
-| 旧配置只有通道、只有模型、映射后才命中或重试到其他通道 | 不启用 native 适配；未选中请求不增加透传要求，不解析或改写错误响应 |
+| GPT 开启 native 适配，受控且保持前缀的连续多轮工具调用 | 一条 WebSocket、正确的 previous_response_id 与新增输入；缓存 token 随可复用历史增长；修改历史应重连 |
+| 原有 GPT 模型名、开启混合适配 | 固定工具扩展生效；不追加隐藏历史；GPT 加密响应及 final 阶段不变 |
+| 未选择的 GPT 通道或重试到其他通道 | 不启用 native 适配；请求不增加透传要求，不解析或改写错误响应 |
 | DeepSeek 主 agent | 多轮工具调用、真实结果写入及读回正常 |
 | GPT 父 agent → DeepSeek 子 agent | 首次任务、同一子 agent 消息及 follow-up 均可消费；GPT 子 agent 正常 |
 | 工具历史中间插入 developer/system | 完整批次可继续；真正缺少结果仍失败，不伪造输出 |
@@ -171,6 +179,17 @@ go test ./transformer/openai/agentcompat ./transformer/openai/responses ./transf
 | GPT 最终回答 | 原有 added=final_answer、done=final_answer |
 | 流异常、中断及非流式响应 | 错误保持可见；不伪造成功/最终答案，不丢失完成阶段 |
 | Codex 原生图像 | 生成、编辑及路由正常；mask 保护与第三方中继边界保持 |
+
+完整管线测试默认跳过，执行时需要本机 `codex` CLI、包含三个模型的目录，以及权限为 `0600` 的外部 JSON 凭据文件。文件结构为 `{"OAuth":{"access_token":"…","expires_at":"…"},"DeepSeekKey":"…","Catalog":"/absolute/path/models.json"}`；OAuth 可包含账号所需的 `id_token`，使用静态凭据，不刷新或保存 token。凭据文件与报告目录均须位于源码仓库外。
+
+```bash
+AXONHUB_AGENT_ISOLATED_LIVE=1 \
+AXONHUB_AGENT_ISOLATED_CONFIG=/secure/path/credentials.json \
+AXONHUB_AGENT_TEST_REPORT_DIR=/secure/path/reports \
+go test ./internal/server/orchestrator -run '^TestLiveAgentCompatibilityIsolated$' -count=1 -v -timeout=20m
+```
+
+报告按 `baseline/`、`mixed/` 分目录。`pipeline-report.json` 仅记录工具类型、目标、标记、nonce 是否回传、用量及连接计数；`native-cli.jsonl` 是合成任务的原始运行记录，不得提交。用完删除临时凭据。此测试通过实际 Process 中间件，所有业务数据都在内存测试库中；旧 relay 测试的限制见下文。
 
 真实验收使用合成任务并显式开启，会产生 API 费用。现有 `TestLivePortableToolHistory`、`TestLivePortableMainAgent`、`TestLiveNativeCodex` 读取 `AXONHUB_AGENT_LIVE=1`、`AXONHUB_AGENT_TEST_URL`（网关根 URL，不含 `/v1`）、`OPENAI_API_KEY`；原生子 agent 测试还需要 `AXONHUB_AGENT_TEST_CATALOG`，可用 `AXONHUB_AGENT_TEST_PARENT` 指定父模型。使用前阅读对应 `*live_test.go`。
 
@@ -188,7 +207,7 @@ go test ./transformer/openai/agentcompat ./transformer/openai/responses ./transf
 | 当前镜像 | `axonhub-local:v1.0.0-beta11-native-images` |
 | 已撤下镜像 | `axonhub-local:v1.0.0-beta11-native-images-codex-v2-phase-3e82c921` |
 | 回退记录目录 | `deployments/20261102-150907-rollback-native-images/` |
-| 候选修复 | `c18afe61` 缓存修复 + `33069930` 作用范围隔离，均未部署；缓存直连对照与范围隔离离线回归分别通过 |
+| 候选修复 | `c18afe61` 缓存修复 + `09938648` 普通模型名混合代理；离线回归及真实管线对照验收通过，未部署 |
 
 每次发布使用新镜像标签，备份现有 Compose，记录源码版本和二进制哈希。服务健康后执行直接网关验收，再更新此表。部署目录中的 `rollback.py` 会先核对部署后 Compose 哈希，匹配才恢复该目录保存的上一份 Compose 并重建 `axonhub` 服务。执行前应核实恢复方向：11 月 2 日回退目录保存的是已撤下的兼容版，其脚本会恢复那个版本，不能将它当作恢复当前健康基线的操作。
 

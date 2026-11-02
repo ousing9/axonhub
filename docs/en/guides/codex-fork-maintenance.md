@@ -4,7 +4,7 @@ This is the maintenance entry point for this fork's Codex patches. Use it during
 
 ## Baseline and patch inventory
 
-As of 2026-11-02, the maintenance branch is `codex/v2-portable-agents`, based on upstream `v1.0.0-beta11` (`b8bb3421`). Production was rolled back to the image-only patch `d798dc63` after a GPT cache regression. Cache repair `c18afe61` passed isolated acceptance and is not deployed. Locally maintained code is published to the personal GitHub fork, with these remote roles:
+As of 2026-11-02, the maintenance branch is `codex/v2-portable-agents`, based on upstream `v1.0.0-beta11` (`b8bb3421`). Production was rolled back to the image-only patch `d798dc63` after a GPT cache regression. Cache repair `c18afe61` and mixed agents using ordinary model names passed isolated acceptance and are not deployed. The dedicated-model restriction from `33069930` has been withdrawn. Locally maintained code is published to the personal GitHub fork, with these remote roles:
 
 | Remote | URL | Purpose |
 | --- | --- | --- |
@@ -22,7 +22,7 @@ git remote add upstream https://github.com/looplj/axonhub.git
 git config remote.pushDefault origin
 ```
 
-These six functional commits follow the baseline, in dependency order. They describe local patches, not features confirmed to be merged upstream. Later documentation commits are separate.
+These are the main maintained patches, in dependency order. Distinguish historical commits from current behavior; this inventory does not establish upstream inclusion.
 
 | Commit | Local capability and reason | Upgrade review focus |
 | --- | --- | --- |
@@ -31,7 +31,7 @@ These six functional commits follow the baseline, in dependency order. They desc
 | `06c35032` | Repair DeepSeek tool histories interrupted by path guidance and prevent passthrough from undoing developer-to-system replacement | History assembly and conversion order, complete tool-batch pairing, final outbound role replacement |
 | `3e82c921` | Prevent Codex progress from collapsing and reopening when DeepSeek starts a message as final and finishes it as commentary | Provisional phase in `output_item.added` and authoritative phase in `output_item.done` |
 | `c18afe61` | Fix the connection/cache regression introduced by `dc8e9d56` appending transient guidance to GPT history; keep guidance in the stable tool description | Multi-turn WebSocket handshakes, `previous_response_id`, incremental input, and actual cached-token growth |
-| `33069930` | Prefer DeepSeek-only adaptation; GPT mixed mode requires both client-model and channel allowlists, with legacy channel-only configuration disabled | Pre-mapping scope, ordinary GPT field preservation, configuration migration, channel retries |
+| `09938648` | Remove the dedicated GPT model alias restriction; support native mixed agents with ordinary model names and add live Process-pipeline comparison | Stable tool descriptions, previous input prefixes, bidirectional DeepSeek messaging and same-child follow-up, native GPT children, cache comparison |
 
 Inspect the complete local delta with:
 
@@ -49,31 +49,21 @@ The implementation is in `llm/transformer/openai/codex/images.go`, its neighbori
 
 ### DeepSeek V2 task adaptation
 
-Recommended: enable only DeepSeek consumer adaptation and leave both native lists empty. All lists empty disables the adapter:
+Mixed mode keeps existing client GPT model names and Codex's native agent lifecycle. Explicitly select GPT Responses passthrough channels and the DeepSeek model in AxonHub; no dedicated model alias is required:
 
 ```yaml
 codex_agent_compatibility:
-  native_models: []
-  native_channel_ids: []
+  native_channel_ids: [36]  # Example: replace with this instance's GPT Responses passthrough channel ID
   portable_models: ["deepseek-flash"]
 ```
 
-`portable_models` exactly matches the original client model before any model mapping. This configuration adapts only DeepSeek task input, tool history, and streaming phases. Ordinary GPT tool catalogs, history, encrypted fields, and response phases bypass this adapter. DeepSeek can run as the main agent and consume existing plaintext child tasks; this does not solve encrypted DeepSeek tasks produced by native GPT tool calls.
+`native_channel_ids` controls the fixed GPT task-tool extension and is rechecked on retries and channel failover. Users keep selecting existing models such as `gpt-6-astra`. When the model uses a DeepSeek plaintext tool, the gateway restores the call to Codex's native `spawn_agent`, `send_message`, or `followup_task`. GPT children keep their original encrypted tools. This adds neither an independent broker nor a second agent lifecycle.
 
-For GPT → DeepSeek child agents, explicitly select a dedicated entry point:
+The fixed tool definitions and descriptions add input tokens compared with disabled adaptation. Guidance is never appended as a hidden message at the end of each request. Acceptance must check connection reuse, `previous_response_id`, cached tokens, and real parent/child round trips, not just successful tool selection.
 
-```yaml
-codex_agent_compatibility:
-  portable_models: ["deepseek-flash"]
-  native_models: ["gpt-6-astra-deepseek"]
-  native_channel_ids: [36]  # Example only: use this instance's GPT Responses passthrough channel ID
-```
+`portable_models` exactly matches the original client model before model mapping. Task-message conversion, tool-history normalization, passthrough role repair, and streaming phase repair apply only to the selected DeepSeek requests. Running DeepSeek as the main agent alone can leave `native_channel_ids` empty; GPT → DeepSeek delegation still needs the GPT plaintext tool extension.
 
-Use AxonHub's existing model mappings to route `gpt-6-astra-deepseek` to the actual GPT model, and explicitly select that alias in the client. The allowlist does not create model routes or client catalog entries. Native adaptation requires **both the original client model and the selected channel to match**. API-key profile mappings and channel model mappings do not change model eligibility; retries and failovers recheck the channel allowlist. Ordinary `gpt-6-astra` remains untouched even on the same channel and upstream model. The dedicated entry point changes the tool catalog and needs its own cache-continuity acceptance.
-
-**Migration: `native_channel_ids` alone no longer enables GPT adaptation.** Missing or empty `native_models` disables it. Restoring mixed mode requires the dedicated alias, routing, and explicit client selection; DeepSeek-only adaptation needs none of these. Keep everyday GPT model names out of the native allowlist to retain isolation.
-
-Channel IDs are instance-specific; do not copy them from another database. Configuration is loaded at startup. The currently supported portable model is `deepseek-flash`; validate protocol behavior before adding another model. These instructions describe candidate source behavior; this change does not alter running configuration or restart the service.
+Channel IDs are instance-specific. Configuration loads at startup; empty lists disable adaptation. The supported portable model is `deepseek-flash`; validate another model before adding it. The experimental `native_models` setting has been withdrawn and should be removed from candidate configurations. Production remains on the rollback version; the configuration above has not been deployed.
 
 On the GPT task-producing side, native `collaboration` tools remain available. Three additional DeepSeek-only tools, `axonhub_v2.dispatch_task`, `deliver_message`, and `continue_task`, are mapped back to native collaboration calls on response. `encrypted_function_args: []` explicitly marks plaintext arguments. This convention was validated with Codex 0.166 and needs review when Codex changes. The adapter does not alter authorization, subagent lifecycle, or encrypted GPT task behavior, and cannot decrypt existing opaque DeepSeek tasks.
 
@@ -130,11 +120,27 @@ Isolated acceptance called the official upstream directly with `gpt-6-astra` and
 | Old adaptation | 4 | 10,501 / 6,912 | 65.8% |
 | Repaired adaptation | 1 | 10,423 / 8,576 | 82.3% |
 
-The repaired path returned 5,376, 6,912, and 8,576 cached tokens in rounds two through four. A separate live tool-selection probe chose `axonhub_v2.dispatch_task` from the tool description; no child was executed. These observations demonstrate restored connection continuity and better caching in the sample, not a fixed production hit-rate guarantee. New input, channel/account switching, model changes, and tool-catalog changes still affect caching. The full live subagent lifecycle has not been rerun after this repair and remains a pre-deployment acceptance item.
+The repaired path returned 5,376, 6,912, and 8,576 cached tokens in rounds two through four. A separate live tool-selection probe chose `axonhub_v2.dispatch_task` from the tool description; no child was executed. These observations demonstrate restored connection continuity and better caching in the sample, not a fixed production hit-rate guarantee. New input, channel/account switching, model changes, and tool-catalog changes still affect caching. The full live subagent lifecycle is covered by the pipeline acceptance below.
 
-`33069930` further narrows the default scope. The complete offline `conf`, `orchestrator`, and three LLM packages above passed. New full-Process tests cover streaming and non-streaming DeepSeek-only configuration, ordinary GPT on the same channel, legacy channel-only configuration, model-only configuration, matches only after mapping, and the dedicated alias matching both allowlists. Bypass tests also check request headers, response/stream identity, and error responses. This scope change made no live upstream calls; a full live child-agent lifecycle through the dedicated entry point still needs isolated acceptance.
+The dedicated-model restriction in `33069930` has been withdrawn. Mixed delegation uses existing model names and the channel allowlist, retaining the stable-description repair from `c18afe61`.
 
-Sanitized acceptance and drivers are saved under `~/.local/state/axonhub-tests/20261102-gpt-cache-c18afe61/`; temporary credentials were deleted. Track source repairs separately from deployment state: the running service remains on the rollback version.
+`TestLiveAgentCompatibilityIsolated` exercises the actual `Process` pipeline, an in-memory database, isolated Codex configuration, and fixed official GPT/DeepSeek upstreams. It does not contact a running gateway or read production databases/personal Codex configuration; the caller explicitly supplies credentials and a model catalog. It checks preservation of prior input across consecutive outbound GPT requests, the initial DeepSeek task, separate messaging, same-child follow-up, a child-generated random nonce round trip, native GPT delegation, and GPT WebSocket handshakes/cache usage.
+
+Actual CLI connection behavior needs a separate qualification: Codex 0.166.0 changes `metadata` and `internal_chat_message_metadata_passthrough` when replaying output; some reasoning items also change `content`. AxonHub's strict prefix comparison therefore still reconnects. A pure GPT control with native adaptation disabled reproduced the same differences. This change does not modify general GPT transport or prefix comparison. The one-connection result above applies to controlled, stable-prefix tests, not every real CLI message shape. Live acceptance records handshakes and compares cached tokens for the parent GPT after its first round; the five-percentage-point regression threshold is a test guard, not a production hit-rate promise.
+
+Full-pipeline samples on 2026-11-02 used Codex 0.166.0 and a `gpt-6-astra` parent. Rates below divide the parent's summed cached tokens by summed input tokens after its first round:
+
+| Comparison | Pure GPT baseline | GPT + DeepSeek | Result |
+| --- | --- | --- | --- |
+| First full comparison | 98.50% | 83.28% | Functionality passed; the mixed group's final round had zero cached tokens and failed the cache gate |
+| Independent run with request diagnostics | 98.33% | 98.38% | Functionality/cache gate passed; earlier outbound input and other top-level fields stayed stable |
+| Final source run | 85.70% | 98.21% | Functionality, real request prefixes, and cache gate passed; the pure GPT baseline also had one zero-cache round |
+
+The single zero-cache round remains unexplained. The final pure GPT control reproduced it with adaptation disabled, so it cannot simply be attributed to DeepSeek adaptation. Successful later samples do not erase the first failure. The diagnostic run had 9 parent requests/9 handshakes in the baseline and 10/10 in the mixed group, showing that reconnection does not automatically mean a cache miss. Retain real-prefix checks, cache comparisons, and upstream anomaly records during upgrades.
+
+Full pipeline reports are in the `acceptance*` directories under `~/.local/state/axonhub-tests/20261102-native-mixed/`. The baseline disables native adaptation and uses GPT children; the mixed group enables stable tools and replaces the first child with DeepSeek. Both execute the same task/message flow. A `context canceled` error is classified as a client interruption only when the downstream HTTP context is also canceled. Other errors and upstream failure events still fail acceptance. Continued execution after messaging, same-target follow-up, and nonce round trips must all succeed.
+
+Sanitized acceptance and drivers are saved under `~/.local/state/axonhub-tests/20261102-gpt-cache-c18afe61/`; temporary credentials for both test batches were deleted. Track source repairs separately from deployment state: the running service remains on the rollback version.
 
 ## Following upstream releases
 
@@ -143,6 +149,8 @@ Sanitized acceptance and drivers are saved under `~/.local/state/axonhub-tests/2
 3. For patches covered upstream, remove the local implementation and run the same behavioral acceptance cases. Evaluate history normalization, role replacement, and phase repair separately rather than dropping the whole adapter when one issue is fixed.
 4. Update this document's baseline, commit mapping, behavior differences, and deployment record in both languages. Retain regression cases to detect future upstream regressions.
 5. Complete offline regression and isolated live acceptance before building and deploying. Upstream upgrades may change frontend assets, dependencies, and the database; build a complete image for the target version. Replacing only the backend binary while inheriting old frontend assets is suitable only for a patch release on the same upstream baseline with no frontend changes.
+
+The upstream `unstable` revision inspected on 2026-11-02 was `aa3a265ddc1a7bb0787d56020a1aa77d8ec0e036`. Tool-output ordering fix [#2633](https://github.com/looplj/axonhub/pull/2633) applies to Responses-to-Chat conversion and does not replace encrypted-task or `agent_message` handling here. That revision also retains strict WebSocket input-prefix comparison. Recheck these findings against future revisions.
 
 Retire a patch when the target version passes its original failure case, not merely because a PR title looks similar. Converted tool-output handling and native Responses passthrough history handling can fail on different paths. References: [DeepSeek Responses documentation](https://api-docs.deepseek.com/guides/responses_api/), [tool-history compatibility report](https://github.com/deepseek-ai/awesome-deepseek-integration/issues/740), and [OpenCode #57372](https://github.com/anomalyco/opencode/issues/57372). The latter reports missing phases; distinguish that from the inconsistent start/end phases observed in this fork.
 
@@ -159,9 +167,9 @@ go test ./transformer/openai/agentcompat ./transformer/openai/responses ./transf
 | Scenario | Expected behavior |
 | --- | --- |
 | Compatibility disabled or DeepSeek-only; ordinary GPT | Existing tool catalog, encrypted arguments, and stream phases remain unchanged |
-| GPT native adaptation enabled across multiple tool rounds | One WebSocket, correct previous_response_id and incremental input; cached tokens grow with reusable history; genuine history edits reconnect |
-| Ordinary GPT and dedicated mixed alias on the same upstream model/channel | Only the alias matching both allowlists injects tools; ordinary GPT input/catalog stay byte-identical and encrypted responses/final phases stay intact |
-| Legacy channel-only, model-only, match only after mapping, retry to another channel | Native adaptation stays disabled; excluded requests gain no passthrough requirement and error responses are not parsed or rewritten |
+| GPT native adaptation enabled across controlled rounds with stable history prefixes | One WebSocket, correct previous_response_id and incremental input; cached tokens grow with reusable history; genuine history edits reconnect |
+| Existing GPT model name with mixed adaptation enabled | Fixed tools are added without hidden history messages; native encrypted responses and final phases stay intact |
+| Unselected GPT channel or retry to another channel | Native adaptation stays disabled; requests gain no passthrough requirement and error responses are not parsed or rewritten |
 | DeepSeek main agent | Multiple tool rounds, actual result writes, and read-back verification succeed |
 | GPT parent → DeepSeek child | Initial task, same-child messaging, and follow-up work; GPT children still work |
 | Developer/system guidance between calls | Complete batches continue; genuinely missing results still fail without fabricated output |
@@ -171,6 +179,17 @@ go test ./transformer/openai/agentcompat ./transformer/openai/responses ./transf
 | GPT final answer | Existing added=final_answer, done=final_answer behavior |
 | Stream errors, interruptions, non-streaming responses | Errors remain visible; no fabricated success/final answer or discarded completion phase |
 | Native Codex images | Generation, editing, routing, mask protection, and third-party relay boundaries remain correct |
+
+The full pipeline test skips by default. It requires a local `codex` CLI, a catalog containing all three models, and an external JSON credential file with mode `0600`. Its shape is `{"OAuth":{"access_token":"…","expires_at":"…"},"DeepSeekKey":"…","Catalog":"/absolute/path/models.json"}`. OAuth may include an account's required `id_token`; the test uses static credentials and does not refresh or persist tokens. Keep credentials and reports outside the source checkout.
+
+```bash
+AXONHUB_AGENT_ISOLATED_LIVE=1 \
+AXONHUB_AGENT_ISOLATED_CONFIG=/secure/path/credentials.json \
+AXONHUB_AGENT_TEST_REPORT_DIR=/secure/path/reports \
+go test ./internal/server/orchestrator -run '^TestLiveAgentCompatibilityIsolated$' -count=1 -v -timeout=20m
+```
+
+Reports are separated into `baseline/` and `mixed/`. `pipeline-report.json` records tool types, targets, markers, nonce-return booleans, usage, and connection counts; `native-cli.jsonl` is a raw synthetic-task trace and must not be committed. Delete temporary credentials afterward. This test uses actual Process middleware with an in-memory test database; limitations of the older relay tests follow below.
 
 Live acceptance uses synthetic tasks, requires explicit opt-in, and incurs API charges. Existing `TestLivePortableToolHistory`, `TestLivePortableMainAgent`, and `TestLiveNativeCodex` read `AXONHUB_AGENT_LIVE=1`, `AXONHUB_AGENT_TEST_URL` (gateway root URL without `/v1`), and `OPENAI_API_KEY`. The native child-agent test additionally needs `AXONHUB_AGENT_TEST_CATALOG`; `AXONHUB_AGENT_TEST_PARENT` selects its parent model. Read the corresponding `*live_test.go` before running it.
 
@@ -188,7 +207,7 @@ Current release record:
 | Current image | `axonhub-local:v1.0.0-beta11-native-images` |
 | Withdrawn image | `axonhub-local:v1.0.0-beta11-native-images-codex-v2-phase-3e82c921` |
 | Rollback record directory | `deployments/20261102-150907-rollback-native-images/` |
-| Candidate repair | `c18afe61` cache repair + `33069930` scope isolation, neither deployed; direct cache comparison and offline scope regression passed respectively |
+| Candidate repair | `c18afe61` cache repair + `09938648` mixed agents with ordinary model names; offline regression and live pipeline comparison passed, not deployed |
 
 Use a new image tag for each release, back up Compose, and record the source version and binary hash. Run direct gateway acceptance after the service becomes healthy, then update this table. Each deployment's `rollback.py` verifies its post-deployment Compose hash before restoring that directory's previous Compose file and recreating the `axonhub` service. Check the restoration direction before execution: the November 2 rollback directory preserves the withdrawn compatibility version, so its script would restore that version rather than the current healthy baseline.
 
