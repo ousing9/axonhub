@@ -53,6 +53,57 @@ func (r *liveAgentReport) event(v map[string]any) {
 	r.Events = append(r.Events, v)
 }
 
+// Missing usage is unknown, not a cache miss. Keep the response identity and
+// original detail object so a later audit can distinguish omission from zero.
+func liveAgentUsageEvent(model, session string, response gjson.Result) map[string]any {
+	event := map[string]any{
+		"model": model, "session": session, "response_id": response.Get("id").String(),
+		"input_tokens_details": response.Get("usage.input_tokens_details").Value(),
+	}
+	for field, path := range map[string]string{
+		"input_tokens":  "usage.input_tokens",
+		"cached_tokens": "usage.input_tokens_details.cached_tokens",
+	} {
+		value := response.Get(path)
+		if value.Type != gjson.Number {
+			event[field] = nil
+			event["usage_error"] = "missing or non-numeric token usage"
+		} else {
+			event[field] = value.Int()
+		}
+	}
+	return event
+}
+
+func TestAgentCompatibilityLiveUsagePresence(t *testing.T) {
+	for _, tc := range []struct {
+		name, usage string
+		cached      any
+		invalid     bool
+	}{
+		{"explicit zero", `{"input_tokens":100,"input_tokens_details":{"cached_tokens":0}}`, int64(0), false},
+		{"cache hit", `{"input_tokens":100,"input_tokens_details":{"cached_tokens":80}}`, int64(80), false},
+		{"missing cached tokens", `{"input_tokens":100,"input_tokens_details":{}}`, nil, true},
+		{"missing details", `{"input_tokens":100}`, nil, true},
+		{"null cached tokens", `{"input_tokens":100,"input_tokens_details":{"cached_tokens":null}}`, nil, true},
+		{"string cached tokens", `{"input_tokens":100,"input_tokens_details":{"cached_tokens":"0"}}`, nil, true},
+		{"missing input", `{"input_tokens_details":{"cached_tokens":80}}`, int64(80), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			event := liveAgentUsageEvent("gpt-test", "session-test", gjson.Parse(`{"id":"resp-test","usage":`+tc.usage+`}`))
+			// Verify the persisted report as well as the value used by the cache gate.
+			encoded, err := json.Marshal(event)
+			require.NoError(t, err)
+			require.Equal(t, tc.cached, event["cached_tokens"])
+			require.Equal(t, tc.invalid, gjson.GetBytes(encoded, "usage_error").Exists())
+			require.Equal(t, "resp-test", event["response_id"])
+			if tc.cached == nil {
+				require.Equal(t, gjson.Null, gjson.GetBytes(encoded, "cached_tokens").Type)
+			}
+		})
+	}
+}
+
 // Observe after all production request middleware, including header persistence.
 // Embedding the concrete outbound preserves its passthrough/finalizer policies.
 type liveAgentOutbound struct {
@@ -246,7 +297,7 @@ func runLiveAgentCompatibility(t *testing.T, mixed bool) *liveAgentReport {
 					report.event(map[string]any{"target": args.Get("target").String(), "task_name": args.Get("task_name").String(), "nonce_reply": len(nonce) > 0 && strings.Contains(args.Get("message").String(), strings.TrimSpace(string(nonce))), "model": model, "session": session, "tool": item.Get("namespace").String() + "." + item.Get("name").String(), "plaintext_marker": item.Get("encrypted_function_args").Raw == "[]", "ciphertext": strings.Contains(item.Get("arguments").String(), "gAAAA")})
 				}
 			case "response.completed":
-				report.event(map[string]any{"model": model, "session": session, "input_tokens": v.Get("response.usage.input_tokens").Int(), "cached_tokens": v.Get("response.usage.input_tokens_details.cached_tokens").Int()})
+				report.event(liveAgentUsageEvent(model, session, v.Get("response")))
 			case "error", "response.failed":
 				report.event(map[string]any{"model": model, "failed_event": v.Get("type").String()})
 			}
@@ -301,6 +352,7 @@ func runLiveAgentCompatibility(t *testing.T, mixed bool) *liveAgentReport {
 	var childMessages, plainCalls, nativeCalls, nonceReplies, rootRounds int
 	lifecycle := map[string]int{}
 	for _, ev := range report.Events {
+		require.Nil(t, ev["usage_error"], "missing usage cannot be treated as a zero-cache response")
 		require.Nil(t, ev["request_prefix_error"])
 		require.Nil(t, ev["error"])
 		require.Nil(t, ev["stream_error"])

@@ -128,15 +128,24 @@ The dedicated-model restriction in `33069930` has been withdrawn. Mixed delegati
 
 Actual CLI connection behavior needs a separate qualification: Codex 0.166.0 changes `metadata` and `internal_chat_message_metadata_passthrough` when replaying output; some reasoning items also change `content`. AxonHub's strict prefix comparison therefore still reconnects. A pure GPT control with native adaptation disabled reproduced the same differences. This change does not modify general GPT transport or prefix comparison. The one-connection result above applies to controlled, stable-prefix tests, not every real CLI message shape. Live acceptance records handshakes and compares cached tokens for the parent GPT after its first round; the five-percentage-point regression threshold is a test guard, not a production hit-rate promise.
 
-Full-pipeline samples on 2026-11-02 used Codex 0.166.0 and a `gpt-6-astra` parent. Rates below divide the parent's summed cached tokens by summed input tokens after its first round:
+Full-pipeline samples on 2026-11-02 used Codex 0.166.0 and a `gpt-6-astra` parent. The rates below use the old recorded counters after the parent's first request. That sampler could not distinguish absent counters from explicit zero; see the audit below:
 
 | Comparison | Pure GPT baseline | GPT + DeepSeek | Result |
 | --- | --- | --- | --- |
-| First full comparison | 98.50% | 83.28% | Functionality passed; the mixed group's final round had zero cached tokens and failed the cache gate |
+| First full comparison | 98.50% | 83.28% | Functionality passed; the mixed group's request 8 was recorded as zero and failed the cache gate |
 | Independent run with request diagnostics | 98.33% | 98.38% | Functionality/cache gate passed; earlier outbound input and other top-level fields stayed stable |
-| Final source run | 85.70% | 98.21% | Functionality, real request prefixes, and cache gate passed; the pure GPT baseline also had one zero-cache round |
+| Final source run | 85.70% | 98.21% | Functionality, real request prefixes, and cache gate passed; request 6 of the pure GPT baseline was also recorded as zero |
 
-The single zero-cache round remains unexplained. The final pure GPT control reproduced it with adaptation disabled, so it cannot simply be attributed to DeepSeek adaptation. Successful later samples do not erase the first failure. The diagnostic run had 9 parent requests/9 handshakes in the baseline and 10/10 in the mixed group, showing that reconnection does not automatically mean a cache miss. Retain real-prefix checks, cache comparisons, and upstream anomaly records during upgrades.
+A per-request audit confirmed both zeros occurred in later requests of the same parent thread. Each CLI trace contains one `thread.started` and one `turn.started`. Statistics include only `gpt-6-astra`; children use `gpt-6-luna` or `deepseek-flash`, and the parent's first request is excluded.
+
+| Sample | Parent request number | Input / recorded cached tokens | Adjacent cached-token counts |
+| --- | --- | --- | --- |
+| First mixed group | 8 | 16,787 / 0 | Request 7: 16,128 |
+| Final pure GPT baseline | 6 | 15,863 / 0 | Request 5: 15,360; request 7: 15,616 |
+
+These are consecutive model calls within one user task, not new conversations or children's first requests. However, the old sampler called `gjson.Int()` directly: missing/null counters also became zero. Archived reports do not retain field presence, so they cannot establish that upstream explicitly returned zero. The supported conclusion is a zero in later-request usage records, with actual cache misses and missing usage still undistinguished—not a confirmed complete upstream cache miss.
+
+The test now preserves response IDs and the original `input_tokens_details`, records missing/non-numeric counters as null plus `usage_error`, and fails acceptance instead of treating them as zero. Offline tests cover explicit zero, positive values, omission, null, and incorrect types; paid live acceptance has not been rerun with this recording correction. Both old groups exhibit the issue, so it cannot simply be attributed to DeepSeek adaptation. Successful later samples do not erase the first failure. The diagnostic run had 9 parent requests/9 handshakes in the baseline and 10/10 in the mixed group, showing that reconnection does not automatically mean a cache miss. Retain real-prefix checks, cache comparisons, and upstream anomaly records during upgrades.
 
 Full pipeline reports are in the `acceptance*` directories under `~/.local/state/axonhub-tests/20261102-native-mixed/`. The baseline disables native adaptation and uses GPT children; the mixed group enables stable tools and replaces the first child with DeepSeek. Both execute the same task/message flow. A `context canceled` error is classified as a client interruption only when the downstream HTTP context is also canceled. Other errors and upstream failure events still fail acceptance. Continued execution after messaging, same-target follow-up, and nonce round trips must all succeed.
 
