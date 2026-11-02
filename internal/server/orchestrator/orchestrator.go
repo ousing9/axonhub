@@ -2,10 +2,7 @@ package orchestrator
 
 import (
 	"context"
-	"slices"
 	"time"
-
-	"github.com/tidwall/gjson"
 
 	"github.com/looplj/axonhub/internal/authz"
 	"github.com/looplj/axonhub/internal/contexts"
@@ -181,10 +178,8 @@ func (processor *ChatCompletionOrchestrator) Process(ctx context.Context, reques
 		request.Body = preparedResponsesBody
 		ctx = shared.WithSessionID(ctx, sessionID)
 	}
-	var portableAgent, nativeAgent bool
+	var portableAgent bool
 	if shared.IsResponsesAPI(ctx) {
-		// Scope native adaptation to the client-selected alias, not a mapped provider model.
-		nativeAgent = request != nil && slices.Contains(processor.agentCompatibility.NativeModels, gjson.GetBytes(request.Body, "model").String())
 		var err error
 		request, portableAgent, err = preparePortableAgentRequest(request, processor.agentCompatibility)
 		if err != nil {
@@ -259,7 +254,7 @@ func (processor *ChatCompletionOrchestrator) Process(ctx context.Context, reques
 	middlewares = append(middlewares, newBillingSystemMessageMiddleware(state))
 
 	inbound, outbound := NewPersistentTransformers(state, processor.Inbound, middlewares...)
-	agentCompatibility := &agentCompatibilityMiddleware{outbound: outbound, config: processor.agentCompatibility, portable: portableAgent, native: nativeAgent}
+	agentCompatibility := &agentCompatibilityMiddleware{outbound: outbound, config: processor.agentCompatibility, portable: portableAgent}
 
 	// Add inbound middlewares (executed after inbound.TransformRequest)
 	middlewares = append(middlewares,

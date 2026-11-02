@@ -26,7 +26,7 @@ func compatibilityTestState() (*agentCompatibilityMiddleware, *PersistenceState)
 		LlmRequest:         &llm.Request{APIFormat: llm.APIFormatOpenAIResponse},
 		RawProviderRequest: &httpclient.Request{APIFormat: string(llm.APIFormatOpenAIResponse)},
 	}
-	return &agentCompatibilityMiddleware{outbound: &PersistentOutboundTransformer{state: state}, native: true, config: AgentCompatibilityConfig{NativeModels: []string{"gpt-6-astra-deepseek"}, NativeChannelIDs: []int{36}, PortableModels: []string{"deepseek-flash"}}}, state
+	return &agentCompatibilityMiddleware{outbound: &PersistentOutboundTransformer{state: state}, config: AgentCompatibilityConfig{NativeChannelIDs: []int{36}, PortableModels: []string{"deepseek-flash"}}}, state
 }
 
 func TestPortablePassthroughHonorsRoleOption(t *testing.T) {
@@ -173,7 +173,7 @@ func TestAgentCompatibilityPortableModelScope(t *testing.T) {
 
 func TestNativeAgentCompatibilityBypass(t *testing.T) {
 	m, state := compatibilityTestState()
-	m.native = false                 // Ordinary GPT, even on an allowlisted passthrough channel.
+	m.config.NativeChannelIDs = nil  // Unselected channels bypass native adaptation.
 	state.PassThroughApplied = false // Bypass must not impose new passthrough requirements.
 	req := &httpclient.Request{APIFormat: string(llm.APIFormatOpenAIResponse), Body: []byte("not parsed"), Headers: http.Header{"Content-Length": {"10"}}}
 	got, err := m.prepareRequest(t.Context(), req)

@@ -14,7 +14,7 @@ func TestAgentCompatibilityConfig(t *testing.T) {
 	for _, enabled := range []bool{false, true} {
 		body := ""
 		if enabled {
-			body = "codex_agent_compatibility:\n  native_channel_ids: [36]\n  native_models: [gpt-6-astra-deepseek]\n  portable_models: [deepseek-flash]\n"
+			body = "codex_agent_compatibility:\n  native_channel_ids: [36]\n  portable_models: [deepseek-flash]\n"
 		}
 		cfg, _, err := loadConfig(writeTestConfig(t, body))
 		if err != nil {
@@ -22,10 +22,10 @@ func TestAgentCompatibilityConfig(t *testing.T) {
 		}
 		got := cfg.CodexAgentCompatibility
 		if enabled {
-			if !slices.Equal(got.NativeModels, []string{"gpt-6-astra-deepseek"}) || !slices.Equal(got.NativeChannelIDs, []int{36}) || !slices.Equal(got.PortableModels, []string{"deepseek-flash"}) {
+			if !slices.Equal(got.NativeChannelIDs, []int{36}) || !slices.Equal(got.PortableModels, []string{"deepseek-flash"}) {
 				t.Fatalf("unexpected compatibility config: %+v", got)
 			}
-		} else if len(got.NativeModels) != 0 || len(got.NativeChannelIDs) != 0 || len(got.PortableModels) != 0 {
+		} else if len(got.NativeChannelIDs) != 0 || len(got.PortableModels) != 0 {
 			t.Fatalf("compatibility must default to disabled: %+v", got)
 		}
 	}
@@ -33,14 +33,12 @@ func TestAgentCompatibilityConfig(t *testing.T) {
 
 func TestAgentCompatibilityEnvironment(t *testing.T) {
 	t.Setenv("AXONHUB_CODEX_AGENT_COMPATIBILITY_NATIVE_CHANNEL_IDS", "[36]")
-	t.Setenv("AXONHUB_CODEX_AGENT_COMPATIBILITY_NATIVE_MODELS", `["gpt-6-astra-deepseek"]`)
 	t.Setenv("AXONHUB_CODEX_AGENT_COMPATIBILITY_PORTABLE_MODELS", `["deepseek-flash"]`)
 	cfg, _, err := loadConfig(writeTestConfig(t, ""))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(cfg.CodexAgentCompatibility.NativeModels, []string{"gpt-6-astra-deepseek"}) ||
-		!slices.Equal(cfg.CodexAgentCompatibility.NativeChannelIDs, []int{36}) ||
+	if !slices.Equal(cfg.CodexAgentCompatibility.NativeChannelIDs, []int{36}) ||
 		!slices.Equal(cfg.CodexAgentCompatibility.PortableModels, []string{"deepseek-flash"}) {
 		t.Fatalf("environment compatibility config was not loaded: %+v", cfg.CodexAgentCompatibility)
 	}

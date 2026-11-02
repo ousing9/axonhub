@@ -18,11 +18,10 @@ import (
 	"github.com/looplj/axonhub/llm/transformer/openai/agentcompat"
 )
 
-// AgentCompatibilityConfig is opt-in. Native producers require both model and channel;
+// AgentCompatibilityConfig is opt-in. Native producers are scoped by channel;
 // portable consumers must be identified before inbound protocol conversion.
 // Empty lists leave all existing requests and responses untouched.
 type AgentCompatibilityConfig struct {
-	NativeModels     []string `conf:"native_models" yaml:"native_models" json:"native_models"`
 	NativeChannelIDs []int    `conf:"native_channel_ids" yaml:"native_channel_ids" json:"native_channel_ids"`
 	PortableModels   []string `conf:"portable_models" yaml:"portable_models" json:"portable_models"`
 }
@@ -65,7 +64,6 @@ type agentCompatibilityMiddleware struct {
 	outbound *PersistentOutboundTransformer
 	config   AgentCompatibilityConfig
 	active   bool
-	native   bool // Set once from the inbound model, before any model mapping.
 	portable bool // Set once from the inbound model; portable consumers skip native injection.
 }
 
@@ -99,7 +97,7 @@ func (m *agentCompatibilityMiddleware) prepareRequest(_ context.Context, req *ht
 		copy.Headers.Del("Content-Length")
 		return &copy, nil
 	}
-	if !m.native || !slices.Contains(m.config.NativeChannelIDs, ch.ID) {
+	if !slices.Contains(m.config.NativeChannelIDs, ch.ID) {
 		return req, nil
 	}
 	// The full private tool schema and plaintext marker must survive both directions.

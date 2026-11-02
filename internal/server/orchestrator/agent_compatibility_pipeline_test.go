@@ -207,11 +207,10 @@ func TestAgentCompatibilityPortablePipeline(t *testing.T) {
 	}
 }
 
-// Both client names route to the same provider model. Only the explicitly
-// selected mixed-agent alias may change the tool catalog or restore tool names.
+// Ordinary GPT model names support mixed agents on explicitly selected channels.
+// Tool injection must not append hidden history or alter native GPT calls/phases.
 func TestNativeAgentCompatibilityScopePipeline(t *testing.T) {
 	const model = "gpt-6-astra"
-	const alias = "gpt-6-astra-deepseek"
 	const input = `[{"type":"message","role":"developer","content":"stable guidance"},{"type":"agent_message","content":[{"type":"encrypted_content","encrypted_content":"opaque-task"}]},{"type":"function_call","call_id":"old","namespace":"collaboration","name":"spawn_agent","arguments":"{\"message\":\"gAAAAciphertext\"}","encrypted_function_args":["message"]},{"type":"function_call_output","call_id":"old","output":"ok"}]`
 	const catalog = `[{"type":"namespace","name":"collaboration","tools":[{"type":"function","name":"spawn_agent","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true}}}},{"type":"function","name":"send_message","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true}}}},{"type":"function","name":"followup_task","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true}}}}]}]`
 	const opaque = `{"type":"function_call","id":"fc_native","call_id":"native","namespace":"collaboration","name":"spawn_agent","arguments":"{\"message\":\"gAAAAciphertext\"}","encrypted_function_args":["message"]}`
@@ -219,18 +218,14 @@ func TestNativeAgentCompatibilityScopePipeline(t *testing.T) {
 	const message = `{"type":"message","id":"msg","role":"assistant","phase":"final_answer","status":"completed","content":[{"type":"output_text","text":"OK"}]}`
 	for _, streaming := range []bool{false, true} {
 		for _, tc := range []struct {
-			name         string
-			clientModel  string
-			nativeModels []string
-			channel      bool
-			active       bool
+			name        string
+			clientModel string
+			channel     bool
+			active      bool
 		}{
 			{name: "DeepSeek only", clientModel: model},
-			{name: "ordinary GPT on enabled channel", clientModel: model, nativeModels: []string{alias}, channel: true},
-			{name: "legacy channel only", clientModel: alias, channel: true},
-			{name: "model only", clientModel: alias, nativeModels: []string{alias}},
-			{name: "mapped model cannot opt in", clientModel: alias, nativeModels: []string{model}, channel: true},
-			{name: "explicit mixed alias", clientModel: alias, nativeModels: []string{alias}, channel: true, active: true},
+			{name: "ordinary GPT enabled", clientModel: model, channel: true, active: true},
+			{name: "ordinary GPT child enabled", clientModel: "gpt-6-luna", channel: true, active: true},
 		} {
 			t.Run(fmt.Sprintf("stream=%t/%s", streaming, tc.name), func(t *testing.T) {
 				captured := make(chan []byte, 1)
@@ -262,13 +257,13 @@ func TestNativeAgentCompatibilityScopePipeline(t *testing.T) {
 				project := createTestProject(t, ctx, client)
 				ch, err := client.Channel.Create().SetType(channel.TypeOpenaiResponses).SetName("GPT scope test").
 					SetBaseURL(upstream.URL + "/v1").SetCredentials(objects.ChannelCredentials{APIKey: "test-key"}).
-					SetSettings(&objects.ChannelSettings{PassThroughBody: new(true), ModelMappings: []objects.ModelMapping{{From: alias, To: model}}}).
-					SetSupportedModels([]string{model}).SetDefaultTestModel(model).Save(ctx)
+					SetSettings(&objects.ChannelSettings{PassThroughBody: new(true)}).
+					SetSupportedModels([]string{model, "gpt-6-luna"}).SetDefaultTestModel(model).Save(ctx)
 				require.NoError(t, err)
 				outbound, err := responses.NewOutboundTransformer(ch.BaseURL, ch.Credentials.APIKey)
 				require.NoError(t, err)
 				channelService, requestService, systemService, usageLogService := setupTestServices(t, client)
-				cfg := AgentCompatibilityConfig{NativeModels: tc.nativeModels, PortableModels: []string{"deepseek-flash"}}
+				cfg := AgentCompatibilityConfig{PortableModels: []string{"deepseek-flash"}}
 				if tc.channel {
 					cfg.NativeChannelIDs = []int{ch.ID}
 				}
@@ -285,7 +280,7 @@ func TestNativeAgentCompatibilityScopePipeline(t *testing.T) {
 				result, err := o.Process(ctx, &httpclient.Request{Method: "POST", URL: "/v1/responses", Body: []byte(body)})
 				require.NoError(t, err)
 				got := <-captured
-				require.Equal(t, model, gjson.GetBytes(got, "model").String())
+				require.Equal(t, tc.clientModel, gjson.GetBytes(got, "model").String())
 				if tc.active {
 					require.JSONEq(t, input, gjson.GetBytes(got, "input").Raw)
 				} else {
