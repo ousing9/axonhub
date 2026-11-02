@@ -17,6 +17,7 @@ func TestPreservesNativeCatalogAndEncryptedGPTHistory(t *testing.T) {
 	var got map[string]any
 	require.NoError(t, json.Unmarshal(result, &got))
 	require.Equal(t, original["tools"].([]any)[0], got["tools"].([]any)[0], "original GPT V2 tool schema must be untouched")
+	require.Equal(t, original["input"], got["input"], "tool injection must not add hidden history messages")
 	require.Len(t, got["tools"], 2)
 	for _, tool := range object(got["tools"].([]any)[1])["tools"].([]any) {
 		require.NotContains(t, object(object(object(object(tool)["parameters"])["properties"])["message"]), "encrypted")

@@ -108,14 +108,13 @@ func RewriteRequest(body []byte, portable bool) ([]byte, error) {
 				continue
 			}
 			owner["tools"] = append(ts, map[string]any{"type": "namespace", "name": Namespace,
-				"description": "Plaintext transport for DeepSeek native Codex V2 agents. Use dispatch_task for deepseek-flash, deliver_message and continue_task for those agents. All tools are mapped back to native Codex collaboration; other agents use the original collaboration namespace.", "tools": functions})
+				"description": "For deepseek-flash ONLY, use axonhub_v2.dispatch_task to spawn a native Codex subagent, axonhub_v2.deliver_message to message it, and axonhub_v2.continue_task for follow-up tasks. These are deterministic transport adapters to the native collaboration tools, not external agents. Use original collaboration tools for GPT agents and for list/wait/interrupt. Preserve all existing permission and delegation requirements. Do not call collaboration.spawn_agent/send_message/followup_task for DeepSeek because its API cannot read encrypted task arguments.", "tools": functions})
 			changed = true
 		}
 	}
-	if changed && !portable {
-		guidance := map[string]any{"type": "message", "role": "developer", "content": []any{map[string]any{"type": "input_text", "text": "For deepseek-flash ONLY, use axonhub_v2.dispatch_task to spawn a native Codex subagent, axonhub_v2.deliver_message to message it, and axonhub_v2.continue_task for follow-up tasks. These are deterministic transport adapters to the native collaboration tools, not external agents. Use original collaboration tools for GPT agents and for list/wait/interrupt. Preserve all existing permission and delegation requirements. Do not call collaboration.spawn_agent/send_message/followup_task for DeepSeek because its API cannot read encrypted task arguments."}}}
-		v["input"] = append(items, guidance)
-	}
+	// Keep routing guidance in the stable tool catalog. A synthetic message at
+	// the end of input would be absent from the next client history and break
+	// the WebSocket executor's previous-response prefix (and cache reuse).
 	// Match the history to the upstream names without touching arguments, output,
 	// prompt text, reasoning, image contents, or arbitrary nested application JSON.
 	for _, raw := range items {
