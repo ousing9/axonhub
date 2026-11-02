@@ -22,7 +22,7 @@ git remote add upstream https://github.com/looplj/axonhub.git
 git config remote.pushDefault origin
 ```
 
-These five functional commits follow the baseline, in dependency order. They describe local patches, not features confirmed to be merged upstream. Later documentation commits are separate.
+These six functional commits follow the baseline, in dependency order. They describe local patches, not features confirmed to be merged upstream. Later documentation commits are separate.
 
 | Commit | Local capability and reason | Upgrade review focus |
 | --- | --- | --- |
@@ -31,6 +31,7 @@ These five functional commits follow the baseline, in dependency order. They des
 | `06c35032` | Repair DeepSeek tool histories interrupted by path guidance and prevent passthrough from undoing developer-to-system replacement | History assembly and conversion order, complete tool-batch pairing, final outbound role replacement |
 | `3e82c921` | Prevent Codex progress from collapsing and reopening when DeepSeek starts a message as final and finishes it as commentary | Provisional phase in `output_item.added` and authoritative phase in `output_item.done` |
 | `c18afe61` | Fix the connection/cache regression introduced by `dc8e9d56` appending transient guidance to GPT history; keep guidance in the stable tool description | Multi-turn WebSocket handshakes, `previous_response_id`, incremental input, and actual cached-token growth |
+| `33069930` | Prefer DeepSeek-only adaptation; GPT mixed mode requires both client-model and channel allowlists, with legacy channel-only configuration disabled | Pre-mapping scope, ordinary GPT field preservation, configuration migration, channel retries |
 
 Inspect the complete local delta with:
 
@@ -48,15 +49,31 @@ The implementation is in `llm/transformer/openai/codex/images.go`, its neighbori
 
 ### DeepSeek V2 task adaptation
 
-The adapter is opt-in; empty configuration leaves default behavior unchanged:
+Recommended: enable only DeepSeek consumer adaptation and leave both native lists empty. All lists empty disables the adapter:
 
 ```yaml
 codex_agent_compatibility:
-  native_channel_ids: []  # IDs of GPT Responses passthrough channels needing tool injection
+  native_models: []
+  native_channel_ids: []
   portable_models: ["deepseek-flash"]
 ```
 
-Channel IDs are instance-specific; do not copy them from another database. Configuration is loaded at startup. The currently supported portable model is `deepseek-flash`; validate protocol behavior before adding another model.
+`portable_models` exactly matches the original client model before any model mapping. This configuration adapts only DeepSeek task input, tool history, and streaming phases. Ordinary GPT tool catalogs, history, encrypted fields, and response phases bypass this adapter. DeepSeek can run as the main agent and consume existing plaintext child tasks; this does not solve encrypted DeepSeek tasks produced by native GPT tool calls.
+
+For GPT → DeepSeek child agents, explicitly select a dedicated entry point:
+
+```yaml
+codex_agent_compatibility:
+  portable_models: ["deepseek-flash"]
+  native_models: ["gpt-6-astra-deepseek"]
+  native_channel_ids: [36]  # Example only: use this instance's GPT Responses passthrough channel ID
+```
+
+Use AxonHub's existing model mappings to route `gpt-6-astra-deepseek` to the actual GPT model, and explicitly select that alias in the client. The allowlist does not create model routes or client catalog entries. Native adaptation requires **both the original client model and the selected channel to match**. API-key profile mappings and channel model mappings do not change model eligibility; retries and failovers recheck the channel allowlist. Ordinary `gpt-6-astra` remains untouched even on the same channel and upstream model. The dedicated entry point changes the tool catalog and needs its own cache-continuity acceptance.
+
+**Migration: `native_channel_ids` alone no longer enables GPT adaptation.** Missing or empty `native_models` disables it. Restoring mixed mode requires the dedicated alias, routing, and explicit client selection; DeepSeek-only adaptation needs none of these. Keep everyday GPT model names out of the native allowlist to retain isolation.
+
+Channel IDs are instance-specific; do not copy them from another database. Configuration is loaded at startup. The currently supported portable model is `deepseek-flash`; validate protocol behavior before adding another model. These instructions describe candidate source behavior; this change does not alter running configuration or restart the service.
 
 On the GPT task-producing side, native `collaboration` tools remain available. Three additional DeepSeek-only tools, `axonhub_v2.dispatch_task`, `deliver_message`, and `continue_task`, are mapped back to native collaboration calls on response. `encrypted_function_args: []` explicitly marks plaintext arguments. This convention was validated with Codex 0.166 and needs review when Codex changes. The adapter does not alter authorization, subagent lifecycle, or encrypted GPT task behavior, and cannot decrypt existing opaque DeepSeek tasks.
 
@@ -115,6 +132,8 @@ Isolated acceptance called the official upstream directly with `gpt-6-astra` and
 
 The repaired path returned 5,376, 6,912, and 8,576 cached tokens in rounds two through four. A separate live tool-selection probe chose `axonhub_v2.dispatch_task` from the tool description; no child was executed. These observations demonstrate restored connection continuity and better caching in the sample, not a fixed production hit-rate guarantee. New input, channel/account switching, model changes, and tool-catalog changes still affect caching. The full live subagent lifecycle has not been rerun after this repair and remains a pre-deployment acceptance item.
 
+`33069930` further narrows the default scope. The complete offline `conf`, `orchestrator`, and three LLM packages above passed. New full-Process tests cover streaming and non-streaming DeepSeek-only configuration, ordinary GPT on the same channel, legacy channel-only configuration, model-only configuration, matches only after mapping, and the dedicated alias matching both allowlists. Bypass tests also check request headers, response/stream identity, and error responses. This scope change made no live upstream calls; a full live child-agent lifecycle through the dedicated entry point still needs isolated acceptance.
+
 Sanitized acceptance and drivers are saved under `~/.local/state/axonhub-tests/20261102-gpt-cache-c18afe61/`; temporary credentials were deleted. Track source repairs separately from deployment state: the running service remains on the rollback version.
 
 ## Following upstream releases
@@ -139,8 +158,10 @@ go test ./transformer/openai/agentcompat ./transformer/openai/responses ./transf
 
 | Scenario | Expected behavior |
 | --- | --- |
-| Compatibility disabled; ordinary GPT | Existing tool catalog, encrypted arguments, and stream phases remain unchanged |
+| Compatibility disabled or DeepSeek-only; ordinary GPT | Existing tool catalog, encrypted arguments, and stream phases remain unchanged |
 | GPT native adaptation enabled across multiple tool rounds | One WebSocket, correct previous_response_id and incremental input; cached tokens grow with reusable history; genuine history edits reconnect |
+| Ordinary GPT and dedicated mixed alias on the same upstream model/channel | Only the alias matching both allowlists injects tools; ordinary GPT input/catalog stay byte-identical and encrypted responses/final phases stay intact |
+| Legacy channel-only, model-only, match only after mapping, retry to another channel | Native adaptation stays disabled; excluded requests gain no passthrough requirement and error responses are not parsed or rewritten |
 | DeepSeek main agent | Multiple tool rounds, actual result writes, and read-back verification succeed |
 | GPT parent → DeepSeek child | Initial task, same-child messaging, and follow-up work; GPT children still work |
 | Developer/system guidance between calls | Complete batches continue; genuinely missing results still fail without fabricated output |
@@ -167,7 +188,7 @@ Current release record:
 | Current image | `axonhub-local:v1.0.0-beta11-native-images` |
 | Withdrawn image | `axonhub-local:v1.0.0-beta11-native-images-codex-v2-phase-3e82c921` |
 | Rollback record directory | `deployments/20261102-150907-rollback-native-images/` |
-| Candidate repair | `c18afe61`, not deployed; relevant offline packages, full orchestrator, and direct official upstream cache comparison passed |
+| Candidate repair | `c18afe61` cache repair + `33069930` scope isolation, neither deployed; direct cache comparison and offline scope regression passed respectively |
 
 Use a new image tag for each release, back up Compose, and record the source version and binary hash. Run direct gateway acceptance after the service becomes healthy, then update this table. Each deployment's `rollback.py` verifies its post-deployment Compose hash before restoring that directory's previous Compose file and recreating the `axonhub` service. Check the restoration direction before execution: the November 2 rollback directory preserves the withdrawn compatibility version, so its script would restore that version rather than the current healthy baseline.
 
