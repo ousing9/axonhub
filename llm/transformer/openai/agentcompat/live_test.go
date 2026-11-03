@@ -38,7 +38,9 @@ func TestLiveNativeCodex(t *testing.T) {
 	var mu sync.Mutex
 	var observations []string
 	observe := func(s string) { mu.Lock(); observations = append(observations, s); mu.Unlock() }
-	client := &http.Client{Timeout: 120 * time.Second}
+	// The CLI turn bounds the test. A shorter relay timeout can truncate an
+	// otherwise valid provider stream while the gateway retries overloads.
+	client := &http.Client{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(io.LimitReader(r.Body, 32<<20))
 		if err != nil {
@@ -129,7 +131,7 @@ func TestLiveNativeCodex(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
 	prompt := `This is an explicitly authorized native V2 subagent acceptance test. Keep all agents on V2. Spawn a deepseek-flash child with fork_turns=none. Ask it to use a shell tool to compute 37*19 and write only 703 to ds-initial.txt in this working directory, then explicitly send_message its result to /root. Wait for completion. Send a followup task to that SAME child to compute 23*17 with a shell tool, write only 391 to ds-followup.txt, and send_message its result to /root. Immediately after spawning the DeepSeek child, send it a separate message asking it to write only TOKEN-82ca into ds-message.txt; tell its initial task to wait for this message before final completion. Also spawn a gpt-6-luna child with fork_turns=none using the standard native collaboration tool; have it use a shell tool to compute 29*31 and write only 899 to luna.txt. Also spawn a gpt-6.1-sol native child with fork_turns=none to use a shell tool to compute 31*37 and write only 1147 to sol.txt. Wait for all tasks and inspect all five files. Do not execute child computations or write their files yourself. Do not spawn other models. Return PASS only after checking all five artifacts and both DeepSeek messages. Working directory: ` + dir
 	prompt = strings.ReplaceAll(prompt, "deepseek-flash", portableModel)

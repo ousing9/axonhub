@@ -4,7 +4,7 @@ This is the maintenance entry point for this fork's Codex patches. Use it during
 
 ## Baseline and patch inventory
 
-As of 2026-11-03, branch `codex/v2-portable-agents` is based on upstream `v1.0.0-beta11` (`b8bb3421`). Cache repair and mixed agents with ordinary model names were deployed in `418d5a89`; health checks alone do not establish live agent acceptance. Current source also removes the GPT channel allowlist and consistently uses configured DeepSeek models. See the deployment record below for release status. The personal GitHub fork uses these remotes:
+As of 2026-11-03, branch `codex/v2-portable-agents` is based on upstream `v1.0.0-beta11` (`b8bb3421`). Cache repair and mixed agents with ordinary model names were deployed in `418d5a89`; health checks alone do not establish live agent acceptance. Deployed version `bb451d04` removes the GPT channel allowlist and applies the same model-based handling regardless of which channel serves DeepSeek. See the deployment record below for release status. The personal GitHub fork uses these remotes:
 
 | Remote | URL | Purpose |
 | --- | --- | --- |
@@ -32,6 +32,7 @@ These are the main maintained patches, in dependency order. Distinguish historic
 | `3e82c921` | Prevent Codex progress from collapsing and reopening when DeepSeek starts a message as final and finishes it as commentary | Provisional phase in `output_item.added` and authoritative phase in `output_item.done` |
 | `c18afe61` | Fix the connection/cache regression introduced by `dc8e9d56` appending transient guidance to GPT history; keep guidance in the stable tool description | Multi-turn WebSocket handshakes, `previous_response_id`, incremental input, and actual cached-token growth |
 | `09938648` | Remove the dedicated GPT model alias restriction; support native mixed agents with ordinary model names and add live Process-pipeline comparison | Stable tool descriptions, previous input prefixes, bidirectional DeepSeek messaging and same-child follow-up, native GPT children, cache comparison |
+| `e021a859`, `bb451d04` | Remove GPT channel allowlisting; use the same model configuration for tools and validation; detect V2 encrypted task capability before extending the catalog | Arbitrary channels and retries share a catalog; both model identifiers use the same path; non-V2 requests remain unchanged |
 
 Inspect the complete local delta with:
 
@@ -144,11 +145,19 @@ A per-request audit confirmed both zeros occurred in later requests of the same 
 
 These are consecutive model calls within one user task, not new conversations or children's first requests. However, the old sampler called `gjson.Int()` directly: missing/null counters also became zero. Archived reports do not retain field presence, so they cannot establish that upstream explicitly returned zero. The supported conclusion is a zero in later-request usage records, with actual cache misses and missing usage still undistinguished—not a confirmed complete upstream cache miss.
 
-The test now preserves response IDs and the original `input_tokens_details`, records missing/non-numeric counters as null plus `usage_error`, and fails acceptance instead of treating them as zero. Offline tests cover explicit zero, positive values, omission, null, and incorrect types; paid live acceptance has not been rerun with this recording correction. Both old groups exhibit the issue, so it cannot simply be attributed to DeepSeek adaptation. Successful later samples do not erase the first failure. The diagnostic run had 9 parent requests/9 handshakes in the baseline and 10/10 in the mixed group, showing that reconnection does not automatically mean a cache miss. Retain real-prefix checks, cache comparisons, and upstream anomaly records during upgrades.
+The test now preserves response IDs and the original `input_tokens_details`, records missing/non-numeric counters as null plus `usage_error`, and fails acceptance instead of treating them as zero. Offline tests cover explicit zero, positive values, omission, null, and incorrect types; live acceptance was rerun with this correction on November 3, as recorded below. Both old groups exhibit the issue, so it cannot simply be attributed to DeepSeek adaptation. Successful later samples do not erase the first failure. The diagnostic run had 9 parent requests/9 handshakes in the baseline and 10/10 in the mixed group, showing that reconnection does not automatically mean a cache miss. Retain real-prefix checks, cache comparisons, and upstream anomaly records during upgrades.
 
 Full pipeline reports are in the `acceptance*` directories under `~/.local/state/axonhub-tests/20261102-native-mixed/`. The baseline disables native adaptation and uses GPT children; the mixed group enables stable tools and replaces the first child with DeepSeek. Both execute the same task/message flow. A `context canceled` error is classified as a client interruption only when the downstream HTTP context is also canceled. Other errors and upstream failure events still fail acceptance. Continued execution after messaging, same-target follow-up, and nonce round trips must all succeed.
 
 Sanitized acceptance and drivers are saved under `~/.local/state/axonhub-tests/20261102-gpt-cache-c18afe61/`; temporary credentials for both test batches were deleted. Track source repairs separately from deployment state: see the current deployment record below.
+
+On 2026-11-03, live Process-pipeline comparison with a shared portable-model list passed. The target model was `deepseek-v4.1-flash`, served by OpenCode Go for this isolated test; that endpoint choice exercises the actual protocol and is not a runtime channel condition. Checks covered initial tasks, separate messages, same-child follow-up, random nonce replies, native encrypted GPT children, and previous input prefixes. Excluding the first completed response, cached/input tokens were 159,360 / 178,684 (89.19%) for pure GPT and 82,432 / 83,225 (99.05%) for mixed agents. OpenAI overload and server_error responses recovered through retries and were not counted as zero-cache responses.
+
+The corrected records confirm an explicit `cached_tokens: 0` in the pure-GPT group's ninth completed response, with 16,128 in rounds eight and ten. The mixed group reported zero only in its first completed response. This separates a later zero in the adaptation-disabled control from a cold first request with a new catalog; it does not establish an upstream cache-loss cause or guarantee a fixed hit rate. Reports are under `~/.local/state/axonhub-tests/20261103-all-channels/`; temporary upstream credentials were deleted.
+
+The first direct gateway run ended at its 300-second deadline. DeepSeek creation, messages, and follow-up calls were observed and both GPT result files were present, but the DeepSeek follow-up file was absent, so the run is recorded as failed. The relay's former 120-second total request timeout could also cut off a long request while the gateway retried. Subsequent acceptance uses an overall eight-minute CLI deadline and request-context cancellation in the relay, with unchanged functional assertions. The first report directory `deployed-opencode/` retained a name based on the model's source; the test did not pin that channel and used ordinary gateway routing.
+
+The subsequent `deployed-v4_1-retry/` direct gateway run passed in 198.31 seconds: parent `gpt-6.1-sol`, DeepSeek target `deepseek-v4.1-flash`, and native GPT children `gpt-6-luna` and `gpt-6.1-sol`. All five artifact contents, two plaintext DeepSeek replies, and both encrypted GPT spawn calls passed. The relay did not inject adaptation or pin a channel ID. This verifies deployed `bb451d04`, excluding visual acceptance of desktop folding. The later success does not erase the first timeout or prove its cause from elapsed times alone.
 
 ## Following upstream releases
 
@@ -212,11 +221,12 @@ Current release record:
 
 | Item | Value |
 | --- | --- |
-| Running source commit | `418d5a89`, cache repair and mixed agents with the old channel allowlist |
-| Current image | `axonhub-local:v1.0.0-beta11-codex-v2-418d5a89` |
-| Previous deployment directory | `deployments/20261103-codex-v2-418d5a89/` |
-| Image-only rollback | `axonhub-local:v1.0.0-beta11-native-images` (`d798dc63`) |
-| Current candidate | Remove channel allowlist and align OpenCode Go model support; offline regression passed, live acceptance and deployment pending |
+| Running source commit | `bb451d04`, model and V2 capability scoping with no channel allowlist |
+| Current image | `axonhub-local:v1.0.0-beta11-codex-v2-bb451d04` |
+| Current deployment directory | `deployments/20261103-codex-all-channels-bb451d04/` |
+| This release's rollback target | Previous image `axonhub-local:v1.0.0-beta11-codex-v2-418d5a89` and its configuration |
+| Image-only rollback | `axonhub-local:v1.0.0-beta11-native-images` (`d798dc63`), retained |
+| Validation | Offline regressions and isolated live functional/cache comparison passed; health version and commit match; direct gateway acceptance with ordinary routing passed |
 
 Use a new image tag for each release, back up Compose, and record the source version and binary hash. Run direct gateway acceptance after the service becomes healthy, then update this table. Each deployment's `rollback.py` verifies its post-deployment Compose hash before restoring that directory's previous Compose file and recreating the `axonhub` service. Check the restoration direction before execution: the November 2 rollback directory preserves the withdrawn compatibility version, so its script would restore that version rather than the current healthy baseline.
 
