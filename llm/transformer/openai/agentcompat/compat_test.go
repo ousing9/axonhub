@@ -64,12 +64,21 @@ func TestOrdinaryPayloadAndToolOutputUntouched(t *testing.T) {
 	got, err := RewriteRequest(input, false, []string{"deepseek-flash"})
 	require.NoError(t, err)
 	require.Equal(t, input, got)
-	_, err = RewriteRequest([]byte(`{"tools":[{"type":"namespace","name":"axonhub_v2"}]}`), false, []string{"deepseek-flash"})
+	unrelated := []byte(`{"tools":[{"type":"namespace","name":"axonhub_v2"}]}`)
+	got, err = RewriteRequest(unrelated, false, []string{"deepseek-flash"})
+	require.NoError(t, err)
+	require.Equal(t, unrelated, got)
+	v, err := decode([]byte(nativeCatalog))
+	require.NoError(t, err)
+	v["tools"] = append(v["tools"].([]any), map[string]any{"type": "namespace", "name": Namespace})
+	conflicting, err := json.Marshal(v)
+	require.NoError(t, err)
+	_, err = RewriteRequest(conflicting, false, []string{"deepseek-flash"})
 	require.ErrorContains(t, err, "conflicts")
 }
 
 func TestPlaintextHistoryAndInvalidAdapterCalls(t *testing.T) {
-	input := []byte(`{"input":[{"type":"function_call","namespace":"collaboration","name":"send_message","arguments":"{\"target\":\"ds\",\"message\":\"follow up\"}"},{"type":"function_call","namespace":"collaboration","name":"list_agents","arguments":"{\"message\":\"unchanged\"}"}]}`)
+	input := []byte(`{"previous_response_id":"resp_previous","input":[{"type":"function_call","namespace":"collaboration","name":"send_message","arguments":"{\"target\":\"ds\",\"message\":\"follow up\"}"},{"type":"function_call","namespace":"collaboration","name":"list_agents","arguments":"{\"message\":\"unchanged\"}"}]}`)
 	got, err := RewriteRequest(input, false, []string{"deepseek-flash"})
 	require.NoError(t, err)
 	require.Contains(t, string(got), `"name":"deliver_message"`)
@@ -172,5 +181,25 @@ func TestConfiguredPortableModels(t *testing.T) {
 				require.ErrorContains(t, err, "configured portable model")
 			}
 		})
+	}
+}
+
+func TestNonV2CollaborationToolsUntouched(t *testing.T) {
+	for _, malformed := range []bool{false, true} {
+		v, err := decode([]byte(nativeCatalog))
+		require.NoError(t, err)
+		for _, raw := range object(v["tools"].([]any)[0])["tools"].([]any) {
+			fn := object(raw)
+			if malformed {
+				delete(fn, "parameters")
+			} else {
+				delete(object(object(object(fn["parameters"])["properties"])["message"]), "encrypted")
+			}
+		}
+		body, err := json.Marshal(v)
+		require.NoError(t, err)
+		got, err := RewriteRequest(body, false, []string{"deepseek-flash"})
+		require.NoError(t, err)
+		require.Equal(t, body, got, "ordinary or incomplete catalogs must not gain V2 adapters")
 	}
 }

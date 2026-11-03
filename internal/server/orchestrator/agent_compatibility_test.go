@@ -75,7 +75,7 @@ func TestAgentCompatibilityDisabledAndOtherFormats(t *testing.T) {
 func TestAgentCompatibilityRestorationBeforePassthroughCapture(t *testing.T) {
 	m, state := compatibilityTestState()
 	ctx := context.Background()
-	_, err := m.prepareRequest(ctx, &httpclient.Request{APIFormat: string(llm.APIFormatOpenAIResponse), Body: []byte(`{"input":[]}`)})
+	_, err := m.prepareRequest(ctx, &httpclient.Request{APIFormat: string(llm.APIFormatOpenAIResponse), Body: []byte(`{"previous_response_id":"resp_previous","input":[]}`)})
 	require.NoError(t, err)
 	raw := &httpclient.Response{StatusCode: 200, Body: []byte(`{"output":[{"type":"function_call","namespace":"axonhub_v2","name":"dispatch_task","arguments":""}]}`)}
 	restored, err := m.OnOutboundRawResponse(ctx, raw)
@@ -93,7 +93,7 @@ func TestAgentCompatibilityRestorationBeforePassthroughCapture(t *testing.T) {
 func TestAgentCompatibilityRetryAndStreamState(t *testing.T) {
 	m, state := compatibilityTestState()
 	ctx := context.Background()
-	_, err := m.prepareRequest(ctx, &httpclient.Request{APIFormat: string(llm.APIFormatOpenAIResponse), Body: []byte(`{"input":[]}`)})
+	_, err := m.prepareRequest(ctx, &httpclient.Request{APIFormat: string(llm.APIFormatOpenAIResponse), Body: []byte(`{"previous_response_id":"resp_previous","input":[]}`)})
 	require.NoError(t, err)
 	event := &httpclient.StreamEvent{Type: "response.output_item.done", Data: []byte(`{"type":"response.output_item.done","item":{"type":"function_call","namespace":"axonhub_v2","name":"continue_task","arguments":""}}`)}
 	s, err := m.OnOutboundRawStream(ctx, streams.SliceStream([]*httpclient.StreamEvent{event}))
@@ -232,4 +232,18 @@ func TestNativeCompatibilityIndependentOfChannel(t *testing.T) {
 			require.Contains(t, string(restored.Body), "deepseek-v4.1-flash")
 		})
 	}
+}
+
+func TestNativeCompatibilityOrdinaryRequestIsUntouched(t *testing.T) {
+	m, _ := compatibilityTestState()
+	req := &httpclient.Request{APIFormat: string(llm.APIFormatOpenAIResponse), Body: []byte(`{"model":"gpt-6-astra","input":"hello","tools":[{"type":"function","name":"probe"}]}`), Headers: http.Header{"Content-Length": {"96"}}}
+	got, err := m.prepareRequest(t.Context(), req)
+	require.NoError(t, err)
+	require.Same(t, req, got)
+	require.Equal(t, "96", got.Headers.Get("Content-Length"))
+	require.False(t, m.active)
+	resp := &httpclient.Response{StatusCode: 200, Body: []byte(`{"type":"response.output_item.added","item":{"type":"message","role":"assistant","phase":"final_answer"}}`)}
+	restored, err := m.OnOutboundRawResponse(t.Context(), resp)
+	require.NoError(t, err)
+	require.Same(t, resp, restored)
 }

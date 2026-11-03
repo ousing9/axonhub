@@ -61,10 +61,10 @@ func RewriteRequest(body []byte, portable bool, portableModels []string) ([]byte
 	}
 	for _, owner := range owners {
 		ts := owner["tools"].([]any)
-		if err := checkCatalog(ts, 0); err != nil {
-			return nil, err
-		}
 		if portable {
+			if err := checkCatalog(ts, 0); err != nil {
+				return nil, err
+			}
 			continue
 		}
 		for _, raw := range ts {
@@ -78,7 +78,10 @@ func RewriteRequest(body []byte, portable bool, portableModels []string) ([]byte
 				fn := object(child)
 				name := text(fn["name"])
 				alias, ok := aliases[name]
-				if !ok {
+				// Only Codex V2's encrypted task schema needs the parallel
+				// plaintext tools. Similarly named ordinary tools stay intact.
+				message := object(object(object(fn["parameters"])["properties"])["message"])
+				if !ok || text(fn["type"]) != "function" || message["encrypted"] != true {
 					continue
 				}
 				encoded, err := json.Marshal(fn)
@@ -110,10 +113,18 @@ func RewriteRequest(body []byte, portable bool, portableModels []string) ([]byte
 			if len(functions) != 3 {
 				continue
 			}
+			if err := checkCatalog(ts, 0); err != nil {
+				return nil, err
+			}
 			owner["tools"] = append(ts, map[string]any{"type": "namespace", "name": Namespace,
 				"description": fmt.Sprintf("For %s ONLY, use axonhub_v2.dispatch_task to spawn a native Codex subagent, axonhub_v2.deliver_message to message it, and axonhub_v2.continue_task for follow-up tasks. These are deterministic transport adapters to the native collaboration tools, not external agents. Use original collaboration tools for GPT agents and for list/wait/interrupt. Preserve all existing permission and delegation requirements. Do not call collaboration.spawn_agent/send_message/followup_task for DeepSeek because its API cannot read encrypted task arguments.", strings.Join(portableModels, ", ")), "tools": functions})
 			changed = true
 		}
+	}
+	// A new native request without the V2 catalog is unrelated. Incremental
+	// requests may omit the catalog already supplied on previous_response_id.
+	if !portable && !changed && text(v["previous_response_id"]) == "" {
+		return body, nil
 	}
 	// Keep routing guidance in the stable tool catalog. A synthetic message at
 	// the end of input would be absent from the next client history and break

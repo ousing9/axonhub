@@ -104,7 +104,7 @@ func (m *agentCompatibilityMiddleware) prepareRequest(_ context.Context, req *ht
 	if err != nil {
 		return nil, err
 	}
-	m.active = true
+	m.active = !bytes.Equal(body, req.Body) || gjson.GetBytes(req.Body, "previous_response_id").String() != ""
 	if bytes.Equal(body, req.Body) {
 		return req, nil
 	}
