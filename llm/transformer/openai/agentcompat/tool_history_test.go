@@ -31,7 +31,7 @@ func TestPortableToolBatchGuidance(t *testing.T) {
 	]}`)
 	before, err := decode(input)
 	require.NoError(t, err)
-	got, err := RewriteRequest(input, true)
+	got, err := RewriteRequest(input, true, []string{"deepseek-flash"})
 	require.NoError(t, err)
 	after, err := decode(got)
 	require.NoError(t, err)
@@ -41,10 +41,10 @@ func TestPortableToolBatchGuidance(t *testing.T) {
 		want = append(want, source[index])
 	}
 	require.Equal(t, want, after["input"], "all payloads, numeric precision and relative orders must survive")
-	second, err := RewriteRequest(got, true)
+	second, err := RewriteRequest(got, true, []string{"deepseek-flash"})
 	require.NoError(t, err)
 	require.Equal(t, got, second, "normalization must be idempotent")
-	native, err := RewriteRequest(input, false)
+	native, err := RewriteRequest(input, false, []string{"deepseek-flash"})
 	require.NoError(t, err)
 	require.Equal(t, input, native, "GPT history must remain byte-identical")
 }
@@ -73,7 +73,7 @@ func TestPortableToolHistoryBoundaries(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			input := []byte(`{ "input": [` + items + `] }`)
 			require.True(t, json.Valid(input))
-			got, err := RewriteRequest(input, true)
+			got, err := RewriteRequest(input, true, []string{"deepseek-flash"})
 			require.NoError(t, err)
 			require.Equal(t, input, got)
 		})

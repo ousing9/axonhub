@@ -85,7 +85,7 @@ func TestAgentCompatibilityPreservesWebSocketContinuation(t *testing.T) {
 				}
 				raw, err := json.Marshal(body)
 				require.NoError(t, err)
-				adapted, err := agentcompat.RewriteRequest(raw, false)
+				adapted, err := agentcompat.RewriteRequest(raw, false, []string{"deepseek-flash", "deepseek-v4.1-flash"})
 				require.NoError(t, err)
 				stream, err := executor.DoStream(webSocketTestContext(), &httpclient.Request{
 					Method: http.MethodPost, URL: server.URL + "/v1/responses",
@@ -99,7 +99,7 @@ func TestAgentCompatibilityPreservesWebSocketContinuation(t *testing.T) {
 						Output []any `json:"output"`
 					} `json:"response"`
 				}
-				restored, err := agentcompat.RestoreResponse(stream.Current().Data, false)
+				restored, err := agentcompat.RestoreResponse(stream.Current().Data, false, []string{"deepseek-flash", "deepseek-v4.1-flash"})
 				require.NoError(t, err)
 				require.NoError(t, json.Unmarshal(restored, &event))
 				for _, raw := range event.Response.Output {

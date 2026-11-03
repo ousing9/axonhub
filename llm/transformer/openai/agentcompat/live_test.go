@@ -29,6 +29,11 @@ func TestLiveNativeCodex(t *testing.T) {
 	require.NotEmpty(t, upstream)
 	catalog := os.Getenv("AXONHUB_AGENT_TEST_CATALOG")
 	require.NotEmpty(t, catalog)
+	deployed := os.Getenv("AXONHUB_AGENT_TEST_DEPLOYED") == "1"
+	portableModel := os.Getenv("AXONHUB_AGENT_TEST_PORTABLE_MODEL")
+	if portableModel == "" {
+		portableModel = "deepseek-flash"
+	}
 	dir := t.TempDir()
 	var mu sync.Mutex
 	var observations []string
@@ -43,10 +48,12 @@ func TestLiveNativeCodex(t *testing.T) {
 		var v map[string]any
 		_ = json.Unmarshal(body, &v)
 		model := text(v["model"])
-		portable := model == "deepseek-flash"
+		portable := model == portableModel
 		isResponses := strings.HasSuffix(r.URL.Path, "/responses")
 		if isResponses {
-			body, err = RewriteRequest(body, portable)
+			if !deployed {
+				body, err = RewriteRequest(body, portable, []string{portableModel})
+			}
 			if err != nil {
 				observe("rewrite-error: " + err.Error())
 				http.Error(w, err.Error(), 400)
@@ -98,7 +105,10 @@ func TestLiveNativeCodex(t *testing.T) {
 						observe("call: " + model + " " + text(item["namespace"]) + "." + text(item["name"]) + " encrypted=" + boolText(strings.Contains(text(item["arguments"]), "gAAAA")))
 					}
 				}
-				fixed, fixErr := RestoreResponse(data, portable)
+				fixed, fixErr := data, error(nil)
+				if !deployed {
+					fixed, fixErr = RestoreResponse(data, portable, []string{portableModel})
+				}
 				if fixErr != nil {
 					observe("restore-error: " + fixErr.Error())
 					return
@@ -122,6 +132,7 @@ func TestLiveNativeCodex(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	prompt := `This is an explicitly authorized native V2 subagent acceptance test. Keep all agents on V2. Spawn a deepseek-flash child with fork_turns=none. Ask it to use a shell tool to compute 37*19 and write only 703 to ds-initial.txt in this working directory, then explicitly send_message its result to /root. Wait for completion. Send a followup task to that SAME child to compute 23*17 with a shell tool, write only 391 to ds-followup.txt, and send_message its result to /root. Immediately after spawning the DeepSeek child, send it a separate message asking it to write only TOKEN-82ca into ds-message.txt; tell its initial task to wait for this message before final completion. Also spawn a gpt-6-luna child with fork_turns=none using the standard native collaboration tool; have it use a shell tool to compute 29*31 and write only 899 to luna.txt. Also spawn a gpt-6.1-sol native child with fork_turns=none to use a shell tool to compute 31*37 and write only 1147 to sol.txt. Wait for all tasks and inspect all five files. Do not execute child computations or write their files yourself. Do not spawn other models. Return PASS only after checking all five artifacts and both DeepSeek messages. Working directory: ` + dir
+	prompt = strings.ReplaceAll(prompt, "deepseek-flash", portableModel)
 	parent := os.Getenv("AXONHUB_AGENT_TEST_PARENT")
 	if parent == "" {
 		parent = "gpt-6.1-sol"
@@ -135,6 +146,7 @@ func TestLiveNativeCodex(t *testing.T) {
 		"-c", `model_catalog_json="` + catalog + `"`, "-c", `features.multi_agent_v2.enabled=true`,
 		"-c", `features.hooks=false`, "-c", `approval_policy="never"`, "-c", `sandbox_mode="danger-full-access"`, prompt}
 	cmd := exec.CommandContext(ctx, "codex", args...)
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME"), "CODEX_HOME=" + t.TempDir(), "OPENAI_API_KEY=" + os.Getenv("OPENAI_API_KEY"), "LANG=C.UTF-8"}
 	output, err := cmd.CombinedOutput()
 	if reportDir := os.Getenv("AXONHUB_AGENT_TEST_REPORT_DIR"); reportDir != "" {
 		require.NoError(t, os.MkdirAll(reportDir, 0700))
@@ -149,14 +161,24 @@ func TestLiveNativeCodex(t *testing.T) {
 	mu.Unlock()
 	t.Log(observed)
 	require.NoError(t, err, "CLI tail: %s", tail(output, 4000))
-	for _, model := range []string{parent, "deepseek-flash", "gpt-6-luna", "gpt-6.1-sol"} {
+	for _, model := range []string{parent, portableModel, "gpt-6-luna", "gpt-6.1-sol"} {
 		require.Contains(t, observed, "request-model: "+model)
 	}
 	for _, name := range []string{"dispatch_task", "deliver_message", "continue_task"} {
-		require.Contains(t, observed, "call: "+parent+" axonhub_v2."+name+" encrypted=false")
+		namespace := "axonhub_v2"
+		if deployed {
+			namespace = "collaboration"
+			for original, alias := range aliases {
+				if name == alias {
+					name = original
+					break
+				}
+			}
+		}
+		require.Contains(t, observed, "call: "+parent+" "+namespace+"."+name+" encrypted=false")
 	}
 	require.GreaterOrEqual(t, strings.Count(observed, "call: "+parent+" collaboration.spawn_agent encrypted=true"), 2)
-	require.GreaterOrEqual(t, strings.Count(observed, "call: deepseek-flash collaboration.send_message encrypted=false"), 2)
+	require.GreaterOrEqual(t, strings.Count(observed, "call: "+portableModel+" collaboration.send_message encrypted=false"), 2)
 	require.NotContains(t, observed, "rewrite-error:")
 	require.NotContains(t, observed, "restore-error:")
 	for name, want := range map[string]string{"ds-initial.txt": "703", "ds-followup.txt": "391", "luna.txt": "899", "sol.txt": "1147", "ds-message.txt": "TOKEN-82ca"} {

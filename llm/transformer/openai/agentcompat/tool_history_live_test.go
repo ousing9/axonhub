@@ -58,7 +58,7 @@ func TestLivePortableToolHistory(t *testing.T) {
 					require.Equal(t, 400, status)
 					require.Contains(t, string(data), "No tool output found")
 				}
-				fixed, err := RewriteRequest(body, true)
+				fixed, err := RewriteRequest(body, true, []string{"deepseek-flash"})
 				require.NoError(t, err)
 				status, data := post(fixed)
 				require.Equal(t, 200, status)
@@ -79,7 +79,7 @@ func TestLivePortableToolHistory(t *testing.T) {
 				v["input"] = items[:len(items)-1]
 				missing, err := json.Marshal(v)
 				require.NoError(t, err)
-				missing, err = RewriteRequest(missing, true)
+				missing, err = RewriteRequest(missing, true, []string{"deepseek-flash"})
 				require.NoError(t, err)
 				status, _ = post(missing)
 				require.Equal(t, 400, status)
@@ -122,7 +122,7 @@ func TestLivePortableMainAgent(t *testing.T) {
 			}
 			body, err = json.Marshal(v)
 			if err == nil {
-				body, err = RewriteRequest(body, true)
+				body, err = RewriteRequest(body, true, []string{"deepseek-flash"})
 			}
 			if err != nil {
 				http.Error(w, "rewrite failed", 400)

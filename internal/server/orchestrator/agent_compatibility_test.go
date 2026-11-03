@@ -2,6 +2,8 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"testing"
 
@@ -26,7 +28,7 @@ func compatibilityTestState() (*agentCompatibilityMiddleware, *PersistenceState)
 		LlmRequest:         &llm.Request{APIFormat: llm.APIFormatOpenAIResponse},
 		RawProviderRequest: &httpclient.Request{APIFormat: string(llm.APIFormatOpenAIResponse)},
 	}
-	return &agentCompatibilityMiddleware{outbound: &PersistentOutboundTransformer{state: state}, config: AgentCompatibilityConfig{NativeChannelIDs: []int{36}, PortableModels: []string{"deepseek-flash"}}}, state
+	return &agentCompatibilityMiddleware{outbound: &PersistentOutboundTransformer{state: state}, config: AgentCompatibilityConfig{PortableModels: []string{"deepseek-flash"}}}, state
 }
 
 func TestPortablePassthroughHonorsRoleOption(t *testing.T) {
@@ -97,9 +99,10 @@ func TestAgentCompatibilityRetryAndStreamState(t *testing.T) {
 	s, err := m.OnOutboundRawStream(ctx, streams.SliceStream([]*httpclient.StreamEvent{event}))
 	require.NoError(t, err)
 	defer s.Close()
-	// A retry on an unrelated channel must not activate rewriting there, nor
+	// A retry on a non-passthrough channel must not activate rewriting there, nor
 	// change the behavior of a stream already bound to the first attempt.
 	state.CurrentCandidate.Channel.ID = 99
+	state.PassThroughApplied = false
 	_, err = m.prepareRequest(ctx, &httpclient.Request{APIFormat: string(llm.APIFormatOpenAIResponse), Body: []byte("not parsed")})
 	require.NoError(t, err)
 	require.False(t, m.active)
@@ -110,7 +113,7 @@ func TestAgentCompatibilityRetryAndStreamState(t *testing.T) {
 	require.NoError(t, s.Err())
 }
 
-func TestAgentCompatibilityRejectsOpaqueTaskAndMissingPassthrough(t *testing.T) {
+func TestAgentCompatibilityRejectsOpaqueTaskAndBypassesOtherProtocols(t *testing.T) {
 	m, state := compatibilityTestState()
 	ctx := context.Background()
 	req := &httpclient.Request{APIFormat: string(llm.APIFormatOpenAIResponse), Body: []byte(`{"model":"deepseek-flash","input":[{"type":"agent_message","content":[{"type":"encrypted_content","encrypted_content":"ciphertext"}]}]}`)}
@@ -118,7 +121,8 @@ func TestAgentCompatibilityRejectsOpaqueTaskAndMissingPassthrough(t *testing.T) 
 	require.ErrorContains(t, err, "plaintext")
 	state.PassThroughApplied = false
 	_, err = m.prepareRequest(ctx, req)
-	require.ErrorContains(t, err, "passthrough")
+	require.NoError(t, err)
+	require.False(t, m.active)
 }
 
 func TestAgentCompatibilityPortableChatCompletionsRoundTrip(t *testing.T) {
@@ -173,7 +177,7 @@ func TestAgentCompatibilityPortableModelScope(t *testing.T) {
 
 func TestNativeAgentCompatibilityBypass(t *testing.T) {
 	m, state := compatibilityTestState()
-	m.config.NativeChannelIDs = nil  // Unselected channels bypass native adaptation.
+	m.config.PortableModels = nil    // Empty configuration disables all adaptation.
 	state.PassThroughApplied = false // Bypass must not impose new passthrough requirements.
 	req := &httpclient.Request{APIFormat: string(llm.APIFormatOpenAIResponse), Body: []byte("not parsed"), Headers: http.Header{"Content-Length": {"10"}}}
 	got, err := m.prepareRequest(t.Context(), req)
@@ -193,4 +197,39 @@ func TestNativeAgentCompatibilityBypass(t *testing.T) {
 	gotStream, err := m.OnOutboundRawStream(t.Context(), stream)
 	require.NoError(t, err)
 	require.Same(t, stream, gotStream)
+}
+
+func TestNativeCompatibilityIndependentOfChannel(t *testing.T) {
+	m, state := compatibilityTestState()
+	m.config.PortableModels = []string{"deepseek-flash", "deepseek-v4.1-flash"}
+	var functions []any
+	for _, name := range []string{"spawn_agent", "send_message", "followup_task"} {
+		functions = append(functions, map[string]any{"type": "function", "name": name, "parameters": map[string]any{"type": "object", "properties": map[string]any{"message": map[string]any{"type": "string", "encrypted": true}}}})
+	}
+	body, err := json.Marshal(map[string]any{"model": "gpt-6-astra", "input": []any{}, "tools": []any{map[string]any{"type": "namespace", "name": "collaboration", "tools": functions}}})
+	require.NoError(t, err)
+	var previous []byte
+	for _, id := range []int{36, 61, 999} {
+		t.Run(fmt.Sprint(id), func(t *testing.T) {
+			state.CurrentCandidate.Channel.ID = id
+			req := &httpclient.Request{APIFormat: string(llm.APIFormatOpenAIResponse), Body: body}
+			got, err := m.prepareRequest(t.Context(), req)
+			require.NoError(t, err)
+			require.True(t, m.active)
+			require.Contains(t, string(got.Body), "dispatch_task")
+			require.Contains(t, string(got.Body), "deepseek-v4.1-flash")
+			if previous != nil {
+				require.Equal(t, previous, got.Body, "failover must not change the catalog or cache prefix")
+			}
+			previous = got.Body
+			args, err := json.Marshal(map[string]string{"model": "deepseek-v4.1-flash", "message": "task"})
+			require.NoError(t, err)
+			response, err := json.Marshal(map[string]any{"output": []any{map[string]any{"type": "function_call", "namespace": "axonhub_v2", "name": "dispatch_task", "arguments": string(args)}}})
+			require.NoError(t, err)
+			restored, err := m.OnOutboundRawResponse(t.Context(), &httpclient.Response{StatusCode: 200, Body: response})
+			require.NoError(t, err)
+			require.Contains(t, string(restored.Body), "spawn_agent")
+			require.Contains(t, string(restored.Body), "deepseek-v4.1-flash")
+		})
+	}
 }

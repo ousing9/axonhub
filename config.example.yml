@@ -3,7 +3,7 @@
 # Copy this file to config.yml and modify as needed
 
 # Optional Codex V2 DeepSeek task transport (disabled by default).
-# Select GPT Responses passthrough channels for fixed DeepSeek task tools.
+# All Responses passthrough channels automatically gain fixed DeepSeek task tools.
 # Keep ordinary GPT model names; no dedicated model aliases are needed.
 # Guidance stays in stable tool descriptions, never appended to each input history.
 # Portable input/history/phase adaptation is scoped to portable_models only.
@@ -15,8 +15,7 @@
 # DeepSeek's provisional final phase collapsing Codex progress before tool calls.
 # Startup configuration; changing these fields requires a service restart.
 codex_agent_compatibility:
-  native_channel_ids: []  # Opt-in GPT Responses passthrough channel IDs
-  portable_models: []     # Enable with ["deepseek-flash"]
+  portable_models: []     # Enable with ["deepseek-flash", "deepseek-v4.1-flash"]
 
 # Server configuration
 server:

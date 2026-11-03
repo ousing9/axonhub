@@ -4,7 +4,7 @@
 
 ## 基线与补丁清单
 
-截至 2026-11-02，维护分支为 `codex/v2-portable-agents`，基于上游 `v1.0.0-beta11`（`b8bb3421`）。生产已因 GPT 缓存回归退回仅含图片修复的 `d798dc63`；缓存修复 `c18afe61` 与普通模型名混合代理方案已完成隔离验收，均未部署。专用模型入口限制 `33069930` 已撤销。自维护代码发布到个人 GitHub fork，远端分工如下：
+截至 2026-11-03，维护分支为 `codex/v2-portable-agents`，基于上游 `v1.0.0-beta11`（`b8bb3421`）。缓存修复和普通模型名混合代理已随 `418d5a89` 部署；仅健康检查不能证明真实代理验收通过。当前源码进一步取消 GPT 通道白名单，并统一使用配置中的 DeepSeek 模型列表。发布状态见文末。自维护代码发布到个人 GitHub fork，远端分工如下：
 
 | Remote | 地址 | 用途 |
 | --- | --- | --- |
@@ -49,21 +49,20 @@ git show <commit>
 
 ### DeepSeek V2 任务适配
 
-混合模式保留客户端原来的 GPT 模型名，继续由 Codex 管理子代理。只需在 AxonHub 显式选择 GPT Responses 透传通道和 DeepSeek 模型，不需要专用模型别名：
+混合模式保留客户端原来的 GPT 模型名，由 Codex 管理子代理。只需声明需要兼容处理的 DeepSeek 模型：
 
 ```yaml
 codex_agent_compatibility:
-  native_channel_ids: [36]  # 示例：替换为本实例用于 GPT 的 Responses 透传通道 ID
-  portable_models: ["deepseek-flash"]
+  portable_models: ["deepseek-flash", "deepseek-v4.1-flash"]
 ```
 
-`native_channel_ids` 控制 GPT 侧固定任务工具扩展，重试或切换通道时重新检查通道白名单。用户照常选择 `gpt-6-astra` 等已有模型。模型侧使用 DeepSeek 专用明文工具后，网关把调用恢复为 Codex 原生 `spawn_agent`、`send_message`、`followup_task`；GPT 子代理继续使用原来的加密工具。这个过程不创建独立 Broker 或第二套代理生命周期。
+所有 Responses body 透传通道均可获得 DeepSeek 明文任务工具，不按通道 ID、名称、账号或 provider 类型筛选。新增通道无需登记白名单；重试与切换通道使用相同的模型列表和固定工具目录。只有请求带有 Codex collaboration 工具时才新增工具；普通请求不会凭空得到子代理工具。通道仍须能完整传递 Codex Responses 工具定义和返回标记，未透传或其他协议路径沿用原行为，不因启用此功能新增错误。
 
-GPT 侧会增加固定的工具定义和描述，因此输入 token 与完全关闭适配时不完全相同。指导不再作为每轮隐藏消息追加到历史末尾。升级验收必须同时检查多轮连接复用、`previous_response_id`、缓存 token 和真实父子代理往返；不能仅检查工具是否被调用。
+原 `native_channel_ids` 是早期限定上线范围的本地选择，并非协议要求，现已移除；请删除对应 YAML 字段或 `AXONHUB_CODEX_AGENT_COMPATIBILITY_NATIVE_CHANNEL_IDS` 环境变量。无需新增 GPT 模型别名。`portable_models` 同时用于 GPT 侧工具的 model 枚举、调用返回校验和 DeepSeek 输入识别，避免配置接受 OpenCode Go、工具仍只接受 `deepseek-flash` 的不一致。它识别需要特殊协议处理的目标模型，不限制哪些 GPT 通道可以发起任务。GPT 子代理保持原生加密工具。
 
-`portable_models` 精确匹配客户端传入的模型名，在模型映射之前判断。任务消息转换、工具历史整理、透传角色修复和流式阶段修复只应用于选中的 DeepSeek 请求，不应用于 GPT。单独使用 DeepSeek 主 agent 时可将 `native_channel_ids` 留空，但 GPT→DeepSeek 的混合任务仍需要 GPT 侧明文工具扩展。
+`portable_models` 精确匹配客户端原始模型名，在模型映射之前判断。任务消息转换、工具历史整理、透传角色修复和流式阶段修复仅作用于这些模型的请求。`deepseek-v4.1-flash` 包括 OpenCode Go 的入口；同名模型经其他通道提供时也按相同规则处理。新的模型入口仍应验证其上游协议，但无须修改源码中的模型常量。
 
-通道 ID 来自当前实例，不能照抄另一套数据库。配置在启动时加载；所有列表为空时关闭适配。当前支持的 portable 模型为 `deepseek-flash`，添加其他模型前应单独验证协议行为。曾引入的 `native_models` 配置已撤销，请从候选配置中移除；它不是运行本方案的条件。生产仍保持回退版本，以上配置尚未部署。
+配置在启动时加载，空模型列表关闭适配。固定工具定义增加一些输入 token；启用或修改模型列表会改变工具前缀一次。之后同一配置的目录保持稳定，不在每轮历史末尾插入隐藏消息。升级需分别检查多轮历史前缀、连接复用、缓存用量及真实父子代理往返。
 
 GPT 生产任务一侧保留 `collaboration`，另加 `axonhub_v2.dispatch_task`、`deliver_message`、`continue_task` 三个工具，只用于 DeepSeek。返回时映射回原生 collaboration 调用，并用 `encrypted_function_args: []` 明确表示明文参数。该约定已按 Codex 0.166 验证，Codex 升级时需要复查。它不改变授权、子 agent 生命周期或 GPT 的加密任务行为；既有不透明的加密 DeepSeek 任务也不会被解密。
 
@@ -122,7 +121,7 @@ call A → call B → output A → output B → 原指导
 
 修复版第二至四轮缓存 token 为 5,376、6,912、8,576。另一次真实工具选择验证中，模型仅凭工具描述选中了 `axonhub_v2.dispatch_task`，没有执行子 agent。这些结果证明了连接连续性恢复和样本中的缓存改善，不承诺生产固定命中率；每轮新增输入、渠道/账号切换、模型及工具目录变化仍会影响缓存。真实子 agent 生命周期由下述完整管线验收覆盖。
 
-专用模型入口限制 `33069930` 已撤销。普通模型名混合调用采用原有通道白名单，保留 `c18afe61` 的固定描述修复。
+专用模型入口限制 `33069930` 已撤销。普通模型名混合调用现适用于所有 Responses 透传通道，保留 `c18afe61` 的固定描述修复。
 
 新增 `TestLiveAgentCompatibilityIsolated` 通过实际 `Process` 管线、内存数据库、独立 Codex 配置和固定的官方 GPT/DeepSeek 上游验收。它不经过生产网关，也不读取生产数据库或个人 Codex 配置；凭据和模型目录由调用者显式提供。测试检查 GPT 连续出站请求保留既有输入前缀、DeepSeek 首次任务、补发消息、同一代理 follow-up、子代理生成的随机 nonce 回传、原生 GPT 子代理，以及 GPT WebSocket 握手次数和缓存用量。
 
@@ -149,7 +148,7 @@ call A → call B → output A → output B → 原指导
 
 完整管线验收报告保存在 `~/.local/state/axonhub-tests/20261102-native-mixed/` 的 `acceptance*` 目录，基线关闭 native 适配并使用 GPT 子代理，混合组启用固定工具并将首个子代理换成 DeepSeek，两组执行相同的任务与消息流程。`context canceled` 只有在下游 HTTP 请求确实取消且错误也是取消时记为客户端中断；其他错误及上游失败事件仍使测试失败。消息打断后的继续执行、同一目标 follow-up 和 nonce 回传均需通过，不能因出现取消就跳过功能检查。
 
-脱敏验收与测试驱动保存在 `~/.local/state/axonhub-tests/20261102-gpt-cache-c18afe61/`；两批测试的临时凭据均已删除。源码修复与生产部署状态应分开记录，当前运行服务保持回退版本。
+脱敏验收与测试驱动保存在 `~/.local/state/axonhub-tests/20261102-gpt-cache-c18afe61/`；两批测试的临时凭据均已删除。源码修复与生产部署状态应分开记录，当前状态见文末。
 
 ## 跟随上游升级
 
@@ -175,10 +174,11 @@ go test ./transformer/openai/agentcompat ./transformer/openai/responses ./transf
 
 | 场景 | 应观察到的结果 |
 | --- | --- |
-| 未开启适配或只开启 DeepSeek；普通 GPT | 工具目录、加密参数和流式阶段维持原行为 |
+| 空模型列表关闭适配；或无 collaboration 工具的普通请求 | 不注入新工具；加密参数和流式阶段维持原行为 |
 | GPT 开启 native 适配，受控且保持前缀的连续多轮工具调用 | 一条 WebSocket、正确的 previous_response_id 与新增输入；缓存 token 随可复用历史增长；修改历史应重连 |
 | 原有 GPT 模型名、开启混合适配 | 固定工具扩展生效；不追加隐藏历史；GPT 加密响应及 final 阶段不变 |
-| 未选择的 GPT 通道或重试到其他通道 | 不启用 native 适配；请求不增加透传要求，不解析或改写错误响应 |
+| 任意 GPT 通道 ID、名称及重试切换 | Responses 透传路径得到相同目录；非透传路径保持原行为；错误响应不改写 |
+| OpenCode Go 的 DeepSeek | model 枚举、spawn 返回校验、输入识别一致；消息与 follow-up 继续走原生生命周期 |
 | DeepSeek 主 agent | 多轮工具调用、真实结果写入及读回正常 |
 | GPT 父 agent → DeepSeek 子 agent | 首次任务、同一子 agent 消息及 follow-up 均可消费；GPT 子 agent 正常 |
 | 工具历史中间插入 developer/system | 完整批次可继续；真正缺少结果仍失败，不伪造输出 |
@@ -189,7 +189,7 @@ go test ./transformer/openai/agentcompat ./transformer/openai/responses ./transf
 | 流异常、中断及非流式响应 | 错误保持可见；不伪造成功/最终答案，不丢失完成阶段 |
 | Codex 原生图像 | 生成、编辑及路由正常；mask 保护与第三方中继边界保持 |
 
-完整管线测试默认跳过，执行时需要本机 `codex` CLI、包含三个模型的目录，以及权限为 `0600` 的外部 JSON 凭据文件。文件结构为 `{"OAuth":{"access_token":"…","expires_at":"…"},"DeepSeekKey":"…","Catalog":"/absolute/path/models.json"}`；OAuth 可包含账号所需的 `id_token`，使用静态凭据，不刷新或保存 token。凭据文件与报告目录均须位于源码仓库外。
+完整管线测试默认跳过，执行时需要本机 `codex` CLI、包含三个模型的目录，以及权限为 `0600` 的外部 JSON 凭据文件。文件结构为 `{"OAuth":{"access_token":"…","expires_at":"…"},"DeepSeekKey":"…","Catalog":"/absolute/path/models.json"}`；OAuth 可包含账号所需的 `id_token`，使用静态凭据，不刷新或保存 token。可选 `DeepSeekModel` 和 `DeepSeekURL` 用于验收 OpenCode Go 等入口，默认分别为 `deepseek-flash`、`https://api.deepseek.com`。凭据文件与报告目录均须位于源码仓库外。
 
 ```bash
 AXONHUB_AGENT_ISOLATED_LIVE=1 \
@@ -202,7 +202,7 @@ go test ./internal/server/orchestrator -run '^TestLiveAgentCompatibilityIsolated
 
 真实验收使用合成任务并显式开启，会产生 API 费用。现有 `TestLivePortableToolHistory`、`TestLivePortableMainAgent`、`TestLiveNativeCodex` 读取 `AXONHUB_AGENT_LIVE=1`、`AXONHUB_AGENT_TEST_URL`（网关根 URL，不含 `/v1`）、`OPENAI_API_KEY`；原生子 agent 测试还需要 `AXONHUB_AGENT_TEST_CATALOG`，可用 `AXONHUB_AGENT_TEST_PARENT` 指定父模型。使用前阅读对应 `*live_test.go`。
 
-这些测试中的 relay 会自行应用部分适配，尤其 `TestLiveNativeCodex` 会注入工具；应连接关闭该适配的隔离实例，避免与生产适配重复注入。relay 测试不能替代部署后直接通过网关的验收。桌面折叠还需观察实际 UI，完成后的聊天记录无法证明流式过程没有闪烁。
+`TestLiveNativeCodex` 默认 relay 会自行应用适配，只可连接关闭适配的隔离实例。部署验收须设 `AXONHUB_AGENT_TEST_DEPLOYED=1`，此时 relay 只观察网关响应，不注入或恢复工具；`AXONHUB_AGENT_TEST_PORTABLE_MODEL` 可选择 OpenCode Go 模型。测试使用独立 CODEX_HOME，模型目录需包含待测模型。桌面折叠还需观察实际 UI，完成后的聊天记录无法证明流式过程没有闪烁。
 
 ## 部署记录与回滚
 
@@ -212,12 +212,14 @@ go test ./internal/server/orchestrator -run '^TestLiveAgentCompatibilityIsolated
 
 | 项目 | 值 |
 | --- | --- |
-| 当前运行提交 | `d798dc63`，仅保留图片修复 |
-| 当前镜像 | `axonhub-local:v1.0.0-beta11-native-images` |
-| 已撤下镜像 | `axonhub-local:v1.0.0-beta11-native-images-codex-v2-phase-3e82c921` |
-| 回退记录目录 | `deployments/20261102-150907-rollback-native-images/` |
-| 候选修复 | `c18afe61` 缓存修复 + `09938648` 普通模型名混合代理；离线回归及真实管线对照验收通过，未部署 |
+| 当前运行提交 | `418d5a89`，包含缓存修复及混合代理，仍使用旧白名单 |
+| 当前镜像 | `axonhub-local:v1.0.0-beta11-codex-v2-418d5a89` |
+| 上次发布目录 | `deployments/20261103-codex-v2-418d5a89/` |
+| 图片修复回退镜像 | `axonhub-local:v1.0.0-beta11-native-images`（`d798dc63`） |
+| 当前候选 | 取消通道白名单、OpenCode Go 模型列表一致性；离线回归通过，待真实验收与部署 |
 
 每次发布使用新镜像标签，备份现有 Compose，记录源码版本和二进制哈希。服务健康后执行直接网关验收，再更新此表。部署目录中的 `rollback.py` 会先核对部署后 Compose 哈希，匹配才恢复该目录保存的上一份 Compose 并重建 `axonhub` 服务。执行前应核实恢复方向：11 月 2 日回退目录保存的是已撤下的兼容版，其脚本会恢复那个版本，不能将它当作恢复当前健康基线的操作。
 
 若 Compose 后续有变更，脚本会停止，需人工比较后再回退，避免覆盖新配置。这些兼容补丁没有数据库迁移；未来主线升级应另行核对数据库备份与迁移回退条件，切换旧镜像本身不等于回滚数据库。
+
+构建 fork 镜像时传入 `--build-arg AXONHUB_BUILD_VERSION=<发布版本>` 和 `--build-arg AXONHUB_BUILD_COMMIT=<完整提交>`，并设置 OCI revision 标签。未传参时沿用上游 VERSION 文件。`418d5a89` 镜像因上游 VERSION 文件陈旧而在健康接口显示 beta9；该显示不代表源码基线，后续发布应检查健康接口中的版本与提交是否匹配发布记录。

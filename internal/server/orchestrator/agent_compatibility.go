@@ -3,7 +3,6 @@ package orchestrator
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"slices"
 
@@ -18,12 +17,11 @@ import (
 	"github.com/looplj/axonhub/llm/transformer/openai/agentcompat"
 )
 
-// AgentCompatibilityConfig is opt-in. Native producers are scoped by channel;
-// portable consumers must be identified before inbound protocol conversion.
-// Empty lists leave all existing requests and responses untouched.
+// AgentCompatibilityConfig enables task delivery to the configured portable models.
+// All Responses passthrough producers use the same stable tool catalog, independent
+// of channel IDs. An empty model list leaves requests and responses untouched.
 type AgentCompatibilityConfig struct {
-	NativeChannelIDs []int    `conf:"native_channel_ids" yaml:"native_channel_ids" json:"native_channel_ids"`
-	PortableModels   []string `conf:"portable_models" yaml:"portable_models" json:"portable_models"`
+	PortableModels []string `conf:"portable_models" yaml:"portable_models" json:"portable_models"`
 }
 
 // Run after Responses session history assembly, before TransformRequest would
@@ -32,7 +30,7 @@ func preparePortableAgentRequest(req *httpclient.Request, cfg AgentCompatibility
 	if req == nil || len(cfg.PortableModels) == 0 || !slices.Contains(cfg.PortableModels, gjson.GetBytes(req.Body, "model").String()) {
 		return req, false, nil
 	}
-	body, err := agentcompat.RewriteRequest(req.Body, true)
+	body, err := agentcompat.RewriteRequest(req.Body, true, cfg.PortableModels)
 	if err != nil {
 		return nil, false, fmt.Errorf("%w: %w", transformer.ErrInvalidRequest, err)
 	}
@@ -47,7 +45,7 @@ type portableAgentResponseMiddleware struct{ pipeline.DummyMiddleware }
 
 func (m *portableAgentResponseMiddleware) Name() string { return "codex-v2-portable-agent-response" }
 func (m *portableAgentResponseMiddleware) OnInboundRawResponse(_ context.Context, resp *httpclient.Response) (*httpclient.Response, error) {
-	return restoreAgentResponse(resp, true)
+	return restoreAgentResponse(resp, true, nil)
 }
 func (m *portableAgentResponseMiddleware) OnInboundRawStream(_ context.Context, stream streams.Stream[*httpclient.StreamEvent]) (streams.Stream[*httpclient.StreamEvent], error) {
 	return &agentCompatibilityStream{Stream: stream, portable: true}, nil
@@ -97,36 +95,38 @@ func (m *agentCompatibilityMiddleware) prepareRequest(_ context.Context, req *ht
 		copy.Headers.Del("Content-Length")
 		return &copy, nil
 	}
-	if !slices.Contains(m.config.NativeChannelIDs, ch.ID) {
+	// The full private tool schema and plaintext marker must survive both directions.
+	// Other protocol paths retain their existing behavior, without new requirements.
+	if len(m.config.PortableModels) == 0 || !m.outbound.state.PassThroughApplied {
 		return req, nil
 	}
-	// The full private tool schema and plaintext marker must survive both directions.
-	if !m.outbound.state.PassThroughApplied {
-		return nil, errors.New("Codex agent compatibility requires Responses body passthrough")
-	}
-	body, err := agentcompat.RewriteRequest(req.Body, false)
+	body, err := agentcompat.RewriteRequest(req.Body, false, m.config.PortableModels)
 	if err != nil {
 		return nil, err
 	}
-	req.Body = body
-	req.Headers = req.Headers.Clone()
-	req.Headers.Del("Content-Length")
 	m.active = true
-	return req, nil
+	if bytes.Equal(body, req.Body) {
+		return req, nil
+	}
+	copy := *req
+	copy.Body = body
+	copy.Headers = req.Headers.Clone()
+	copy.Headers.Del("Content-Length")
+	return &copy, nil
 }
 
 func (m *agentCompatibilityMiddleware) OnOutboundRawResponse(_ context.Context, resp *httpclient.Response) (*httpclient.Response, error) {
 	if !m.active {
 		return resp, nil
 	}
-	return restoreAgentResponse(resp, false)
+	return restoreAgentResponse(resp, false, m.config.PortableModels)
 }
 
-func restoreAgentResponse(resp *httpclient.Response, portable bool) (*httpclient.Response, error) {
+func restoreAgentResponse(resp *httpclient.Response, portable bool, portableModels []string) (*httpclient.Response, error) {
 	if resp == nil || resp.StatusCode >= 400 {
 		return resp, nil
 	}
-	body, err := agentcompat.RestoreResponse(resp.Body, portable)
+	body, err := agentcompat.RestoreResponse(resp.Body, portable, portableModels)
 	if err != nil {
 		return nil, err
 	}
@@ -144,14 +144,15 @@ func (m *agentCompatibilityMiddleware) OnOutboundRawStream(_ context.Context, st
 	if !m.active {
 		return stream, nil
 	}
-	return &agentCompatibilityStream{Stream: stream}, nil
+	return &agentCompatibilityStream{Stream: stream, portableModels: m.config.PortableModels}, nil
 }
 
 type agentCompatibilityStream struct {
 	streams.Stream[*httpclient.StreamEvent]
-	portable bool
-	current  *httpclient.StreamEvent
-	err      error
+	portable       bool
+	portableModels []string
+	current        *httpclient.StreamEvent
+	err            error
 }
 
 func (s *agentCompatibilityStream) Next() bool {
@@ -163,7 +164,7 @@ func (s *agentCompatibilityStream) Next() bool {
 		s.current = event
 		return true
 	}
-	body, err := agentcompat.RestoreResponse(event.Data, s.portable)
+	body, err := agentcompat.RestoreResponse(event.Data, s.portable, s.portableModels)
 	if err != nil {
 		s.err = err
 		return false

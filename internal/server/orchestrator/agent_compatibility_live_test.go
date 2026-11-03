@@ -180,15 +180,23 @@ func TestLiveAgentCompatibilityIsolated(t *testing.T) {
 func runLiveAgentCompatibility(t *testing.T, mixed bool) *liveAgentReport {
 	t.Helper()
 	var cfg struct {
-		OAuth       oauth.OAuthCredentials
-		DeepSeekKey string
-		Catalog     string
+		OAuth         oauth.OAuthCredentials
+		DeepSeekKey   string
+		DeepSeekModel string
+		DeepSeekURL   string
+		Catalog       string
 	}
 	raw, err := os.ReadFile(os.Getenv("AXONHUB_AGENT_ISOLATED_CONFIG"))
 	require.NoError(t, err)
 	require.NoError(t, json.Unmarshal(raw, &cfg))
 	require.NotEmpty(t, cfg.OAuth.AccessToken)
 	require.NotEmpty(t, cfg.DeepSeekKey)
+	if cfg.DeepSeekModel == "" {
+		cfg.DeepSeekModel = "deepseek-flash"
+	}
+	if cfg.DeepSeekURL == "" {
+		cfg.DeepSeekURL = "https://api.deepseek.com"
+	}
 	reportDir := os.Getenv("AXONHUB_AGENT_TEST_REPORT_DIR")
 	require.NotEmpty(t, reportDir)
 	mode := "baseline"
@@ -213,10 +221,13 @@ func runLiveAgentCompatibility(t *testing.T, mixed bool) *liveAgentReport {
 	native, err := codex.NewOutboundTransformer(codex.Params{TokenProvider: oauth.NewStaticTokenProvider(&cfg.OAuth), Transport: responses.TransportWebSocket})
 	require.NoError(t, err)
 	defer native.Stop()
-	portable, err := responses.NewOutboundTransformer("https://api.deepseek.com", cfg.DeepSeekKey)
+	portable, err := responses.NewOutboundTransformer(cfg.DeepSeekURL, cfg.DeepSeekKey)
 	require.NoError(t, err)
 	processors := map[string]*ChatCompletionOrchestrator{}
-	var nativeID int
+	var compatibility AgentCompatibilityConfig
+	if mixed {
+		compatibility.PortableModels = []string{"deepseek-flash", "deepseek-v4.1-flash"}
+	}
 	for _, spec := range []struct {
 		models   []string
 		kind     channel.Type
@@ -225,21 +236,18 @@ func runLiveAgentCompatibility(t *testing.T, mixed bool) *liveAgentReport {
 		url      string
 	}{
 		{[]string{"gpt-6-astra", "gpt-6-luna"}, channel.TypeCodex, &liveAgentOutbound{native, report}, &objects.ChannelSettings{PassThroughBody: new(true)}, "https://chatgpt.com/backend-api/codex"},
-		{[]string{"deepseek-flash"}, channel.TypeOpenaiResponses, portable, &objects.ChannelSettings{PassThroughBody: new(true), TransformOptions: objects.TransformOptions{ReplaceDeveloperRoleWithSystem: true}}, "https://api.deepseek.com"},
+		{[]string{cfg.DeepSeekModel}, channel.TypeOpenaiResponses, portable, &objects.ChannelSettings{PassThroughBody: new(true), TransformOptions: objects.TransformOptions{ReplaceDeveloperRoleWithSystem: true}}, cfg.DeepSeekURL},
 	} {
 		ch, err := db.Channel.Create().SetType(spec.kind).SetName(spec.models[0]).SetBaseURL(spec.url).
 			SetCredentials(objects.ChannelCredentials{APIKey: "synthetic-not-used"}).SetSupportedModels(spec.models).SetDefaultTestModel(spec.models[0]).SetSettings(spec.settings).Save(ctx)
 		require.NoError(t, err)
-		if spec.kind == channel.TypeCodex && mixed {
-			nativeID = ch.ID
-		}
 		for _, model := range spec.models {
 			processors[model] = (&ChatCompletionOrchestrator{
 				channelSelector: &staticChannelSelector{candidates: channelsToTestCandidates([]*biz.Channel{{Channel: ch, Outbound: spec.out}}, model)},
 				Inbound:         responses.NewInboundTransformer(), RequestService: requestService, ChannelService: channelService,
 				PromptProvider: &stubPromptProvider{}, SystemService: systemService, UsageLogService: usageLogService,
 				PipelineFactory: pipeline.NewFactory(httpclient.NewHttpClient()), ModelMapper: NewModelMapper(), channelLimiterManager: NewChannelLimiterManager(),
-			}).WithAgentCompatibility(AgentCompatibilityConfig{NativeChannelIDs: []int{nativeID}, PortableModels: []string{"deepseek-flash"}})
+			}).WithAgentCompatibility(compatibility)
 		}
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -323,6 +331,8 @@ func runLiveAgentCompatibility(t *testing.T, mixed bool) *liveAgentReport {
 	prompt := `This is an explicitly authorized native V2 agent acceptance test. Use the normal GPT and DeepSeek model names. Spawn exactly one deepseek-flash child with task_name=ds_probe and fork_turns=none. Address subsequent messages and followup_task to /root/ds_probe. Its initial task: use the shell to compute 37*19 and write only 703 to ds-initial.txt; generate a random 16-hex-character nonce using the shell and write it to nonce.txt; explicitly send_message both results to /root; wait for a separate message before final completion. Immediately send that child a separate message to write only TOKEN-82ca to ds-message.txt. Wait for its initial work to complete. Send a followup_task to that SAME child to read nonce.txt, compute 23*17, write only 391 to ds-followup.txt, and explicitly send_message its result and the original nonce to /root. Also spawn one gpt-6-luna child using the native collaboration tool, fork_turns=none; ask it to compute 29*31 with the shell and write only 899 to luna.txt. Wait for all work, then read and verify all five files. Do not write these files yourself or perform the child tasks yourself. Do not spawn additional children. Return PASS and the received nonce only after all checks succeed. All work is in this directory: ` + work
 	if !mixed {
 		prompt = strings.Replace(prompt, "Spawn exactly one deepseek-flash child", "Spawn exactly one gpt-6-luna child", 1)
+	} else {
+		prompt = strings.ReplaceAll(prompt, "deepseek-flash", cfg.DeepSeekModel)
 	}
 	runCtx, cancel := context.WithTimeout(t.Context(), 8*time.Minute)
 	defer cancel()
@@ -357,7 +367,7 @@ func runLiveAgentCompatibility(t *testing.T, mixed bool) *liveAgentReport {
 		require.Nil(t, ev["error"])
 		require.Nil(t, ev["stream_error"])
 		require.Nil(t, ev["failed_event"])
-		if ev["model"] == "deepseek-flash" && ev["tool"] == "collaboration.send_message" && ev["plaintext_marker"] == true {
+		if ev["model"] == cfg.DeepSeekModel && ev["tool"] == "collaboration.send_message" && ev["plaintext_marker"] == true {
 			childMessages++
 			if ev["nonce_reply"] == true && ev["target"] == "/root" {
 				nonceReplies++

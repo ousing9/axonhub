@@ -207,7 +207,7 @@ func TestAgentCompatibilityPortablePipeline(t *testing.T) {
 	}
 }
 
-// Ordinary GPT model names support mixed agents on explicitly selected channels.
+// Ordinary GPT model names support mixed agents on all Responses passthrough channels.
 // Tool injection must not append hidden history or alter native GPT calls/phases.
 func TestNativeAgentCompatibilityScopePipeline(t *testing.T) {
 	const model = "gpt-6-astra"
@@ -220,14 +220,20 @@ func TestNativeAgentCompatibilityScopePipeline(t *testing.T) {
 		for _, tc := range []struct {
 			name        string
 			clientModel string
-			channel     bool
+			enabled     bool
+			openCode    bool
 			active      bool
 		}{
-			{name: "DeepSeek only", clientModel: model},
-			{name: "ordinary GPT enabled", clientModel: model, channel: true, active: true},
-			{name: "ordinary GPT child enabled", clientModel: "gpt-6-luna", channel: true, active: true},
+			{name: "disabled", clientModel: model},
+			{name: "ordinary GPT enabled", clientModel: model, enabled: true, active: true},
+			{name: "OpenCode Go subagent", clientModel: model, enabled: true, active: true, openCode: true},
+			{name: "ordinary GPT child enabled", clientModel: "gpt-6-luna", enabled: true, active: true},
 		} {
 			t.Run(fmt.Sprintf("stream=%t/%s", streaming, tc.name), func(t *testing.T) {
+				adapter := adapter
+				if tc.openCode {
+					adapter = strings.ReplaceAll(adapter, "deepseek-flash", "deepseek-v4.1-flash")
+				}
 				captured := make(chan []byte, 1)
 				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					body, err := io.ReadAll(r.Body)
@@ -263,9 +269,9 @@ func TestNativeAgentCompatibilityScopePipeline(t *testing.T) {
 				outbound, err := responses.NewOutboundTransformer(ch.BaseURL, ch.Credentials.APIKey)
 				require.NoError(t, err)
 				channelService, requestService, systemService, usageLogService := setupTestServices(t, client)
-				cfg := AgentCompatibilityConfig{PortableModels: []string{"deepseek-flash"}}
-				if tc.channel {
-					cfg.NativeChannelIDs = []int{ch.ID}
+				cfg := AgentCompatibilityConfig{}
+				if tc.enabled {
+					cfg.PortableModels = []string{"deepseek-flash", "deepseek-v4.1-flash"}
 				}
 				o := (&ChatCompletionOrchestrator{
 					channelSelector: &staticChannelSelector{candidates: channelsToTestCandidates([]*biz.Channel{{Channel: ch, Outbound: outbound}}, tc.clientModel)},

@@ -38,7 +38,10 @@ func text(v any) string           { s, _ := v.(string); return s }
 // RewriteRequest prepares new plaintext collaboration calls. Portable mode also
 // adapts agent_message input to public Responses messages. Native mode preserves
 // existing native agent inputs, including opaque encrypted history.
-func RewriteRequest(body []byte, portable bool) ([]byte, error) {
+func RewriteRequest(body []byte, portable bool, portableModels []string) ([]byte, error) {
+	if !portable && len(portableModels) == 0 {
+		return body, nil
+	}
 	v, err := decode(body)
 	if err != nil {
 		return nil, err
@@ -87,15 +90,15 @@ func RewriteRequest(body []byte, portable bool) ([]byte, error) {
 					return nil, err
 				}
 				copy["name"] = alias
-				copy["description"] = map[string]string{
-					"spawn_agent":   "Spawn a deepseek-flash native Codex V2 subagent with plaintext task delivery. Codex owns its thread, tools and lifecycle. Other models use collaboration.spawn_agent.",
-					"send_message":  "Send a plaintext message to an existing deepseek-flash native agent. Does not wake an idle agent; use continue_task for new work.",
-					"followup_task": "Send a plaintext follow-up task to an existing deepseek-flash native agent; wake it if idle.",
-				}[name]
+				copy["description"] = fmt.Sprintf(map[string]string{
+					"spawn_agent":   "Spawn a %s native Codex V2 subagent with plaintext task delivery. Codex owns its thread, tools and lifecycle. Other models use collaboration.spawn_agent.",
+					"send_message":  "Send a plaintext message to an existing %s native agent. Does not wake an idle agent; use continue_task for new work.",
+					"followup_task": "Send a plaintext follow-up task to an existing %s native agent; wake it if idle.",
+				}[name], strings.Join(portableModels, ", "))
 				properties := object(object(copy["parameters"])["properties"])
 				delete(object(properties["message"]), "encrypted")
 				if name == "spawn_agent" {
-					properties["model"] = map[string]any{"type": "string", "enum": []string{"deepseek-flash"}}
+					properties["model"] = map[string]any{"type": "string", "enum": portableModels}
 					parameters := object(copy["parameters"])
 					required, _ := parameters["required"].([]any)
 					if !slices.Contains(required, any("model")) {
@@ -108,7 +111,7 @@ func RewriteRequest(body []byte, portable bool) ([]byte, error) {
 				continue
 			}
 			owner["tools"] = append(ts, map[string]any{"type": "namespace", "name": Namespace,
-				"description": "For deepseek-flash ONLY, use axonhub_v2.dispatch_task to spawn a native Codex subagent, axonhub_v2.deliver_message to message it, and axonhub_v2.continue_task for follow-up tasks. These are deterministic transport adapters to the native collaboration tools, not external agents. Use original collaboration tools for GPT agents and for list/wait/interrupt. Preserve all existing permission and delegation requirements. Do not call collaboration.spawn_agent/send_message/followup_task for DeepSeek because its API cannot read encrypted task arguments.", "tools": functions})
+				"description": fmt.Sprintf("For %s ONLY, use axonhub_v2.dispatch_task to spawn a native Codex subagent, axonhub_v2.deliver_message to message it, and axonhub_v2.continue_task for follow-up tasks. These are deterministic transport adapters to the native collaboration tools, not external agents. Use original collaboration tools for GPT agents and for list/wait/interrupt. Preserve all existing permission and delegation requirements. Do not call collaboration.spawn_agent/send_message/followup_task for DeepSeek because its API cannot read encrypted task arguments.", strings.Join(portableModels, ", ")), "tools": functions})
 			changed = true
 		}
 	}
@@ -218,7 +221,10 @@ func renameCall(item map[string]any, restore bool) bool {
 
 // RestoreResponse handles a bounded JSON response or one complete SSE/WS event.
 // It also runs on incremental responses with no tool catalog in that request.
-func RestoreResponse(body []byte, portable bool) ([]byte, error) {
+func RestoreResponse(body []byte, portable bool, portableModels []string) ([]byte, error) {
+	if !portable && len(portableModels) == 0 {
+		return body, nil
+	}
 	if bytes.Equal(bytes.TrimSpace(body), []byte("[DONE]")) {
 		return body, nil
 	}
@@ -226,7 +232,7 @@ func RestoreResponse(body []byte, portable bool) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	changed, err := restoreEnvelope(v, 0, portable)
+	changed, err := restoreEnvelope(v, 0, portable, portableModels)
 	if err != nil {
 		return nil, err
 	}
@@ -248,7 +254,7 @@ func RestoreResponse(body []byte, portable bool) ([]byte, error) {
 	return json.Marshal(v)
 }
 
-func restoreEnvelope(v map[string]any, depth int, portable bool) (bool, error) {
+func restoreEnvelope(v map[string]any, depth int, portable bool, portableModels []string) (bool, error) {
 	if depth > 8 {
 		return false, errors.New("response nesting exceeds compatibility limit")
 	}
@@ -268,8 +274,8 @@ func restoreEnvelope(v map[string]any, depth int, portable bool) (bool, error) {
 				if strings.HasPrefix(strings.TrimSpace(text(args["message"])), "gAAAA") {
 					return false, errors.New("upstream returned an opaque collaboration task")
 				}
-				if restored && text(v["name"]) == "spawn_agent" && text(args["model"]) != "deepseek-flash" {
-					return false, errors.New("DeepSeek task adapter requires model deepseek-flash")
+				if restored && text(v["name"]) == "spawn_agent" && !slices.Contains(portableModels, text(args["model"])) {
+					return false, fmt.Errorf("DeepSeek task adapter requires a configured portable model, got %q", text(args["model"]))
 				}
 			}
 			// Codex 0.166 recognizes this explicit marker as a plaintext direct call.
@@ -279,7 +285,7 @@ func restoreEnvelope(v map[string]any, depth int, portable bool) (bool, error) {
 	}
 	for _, key := range []string{"item", "response"} {
 		if child := object(v[key]); child != nil {
-			c, err := restoreEnvelope(child, depth+1, portable)
+			c, err := restoreEnvelope(child, depth+1, portable, portableModels)
 			if err != nil {
 				return false, fmt.Errorf("restore %s: %w", key, err)
 			}
@@ -289,7 +295,7 @@ func restoreEnvelope(v map[string]any, depth int, portable bool) (bool, error) {
 	if output, ok := v["output"].([]any); ok {
 		for _, raw := range output {
 			if item := object(raw); item != nil {
-				c, err := restoreEnvelope(item, depth+1, portable)
+				c, err := restoreEnvelope(item, depth+1, portable, portableModels)
 				if err != nil {
 					return false, err
 				}

@@ -214,7 +214,6 @@ func customizedDecodeHook(srcType reflect.Type, dstType reflect.Type, data any) 
 
 // setDefaults sets default configuration values.
 func setDefaults(v *viper.Viper) {
-	v.SetDefault("codex_agent_compatibility.native_channel_ids", []int{})
 	v.SetDefault("codex_agent_compatibility.portable_models", []string{})
 	// Server defaults
 	v.SetDefault("server.host", "0.0.0.0")
