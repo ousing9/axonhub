@@ -30,6 +30,7 @@ git config remote.pushDefault origin
 | `dc8e9d56` | DeepSeek 无法消费 Codex V2 的加密任务参数；增加明文任务适配，继续使用 Codex 原生子 agent 生命周期 | 工具目录、`agent_message` 输入、调用名称恢复、`encrypted_function_args` 标记、配置注入 |
 | `06c35032` | DeepSeek 工具历史被路径指导消息打断时会误报缺少工具结果；同时修复透传覆盖 developer→system 配置的问题 | 历史组装与协议转换的顺序、完整工具批次配对、最终出站角色替换 |
 | `3e82c921` | DeepSeek 流式消息先标记 final，结束时可能改成 commentary，导致 Codex 前文先折叠后展开 | `output_item.added` 的临时阶段与 `output_item.done` 的最终阶段 |
+| `888a052c` | DeepSeek 新版 Responses 事件缺少阶段；补全前导语与最终回答的跨事件推断，同时保留文字实时输出 | portable 流只暂存消息 `done`，工具调用定为 `commentary`，完成事件定为 `final_answer`；GPT/native 不变 |
 | `c18afe61` | 修复 `dc8e9d56` 在 GPT 历史末尾注入临时指导导致的连接复用和缓存回归；将指导保留在固定工具描述中 | 多轮真实 WebSocket 握手数、`previous_response_id` 与增量输入、实际缓存 token 增长 |
 | `09938648` | 撤销专用 GPT 模型别名限制，普通模型名支持原生混合代理；增加完整 Process 管线的真实对照验收 | 固定工具描述、既有输入前缀、DeepSeek 双向消息与同一代理 follow-up、GPT 子代理及缓存对照 |
 | `e021a859`、`bb451d04` | 移除 GPT 通道白名单；统一从模型配置生成工具与校验，仅在识别到 V2 加密工具能力时扩展 | 任意通道及重试目录一致；两个模型标识走相同路径；非 V2 请求不变 |
