@@ -100,9 +100,9 @@ Calls, results, and guidance content are preserved. Missing or duplicate IDs, mi
 
 On 2026-10-31, a direct request to DeepSeek's official API, bypassing AxonHub, reproduced a tool preamble starting as `final_answer` and finishing as `commentary`. AxonHub previously passed those phases through. Codex collapsed earlier progress on the start event and reopened it on completion.
 
-In portable mode only, `RestoreResponse` changes `final_answer` to `commentary` on assistant messages in `response.output_item.added`. Text deltas, completion phases, and non-streaming responses remain intact. There is no whole-message buffering and no GPT phase rewrite. Missing or unknown phases are not inferred.
+In portable mode, `RestoreResponse` still changes an explicit `final_answer` to `commentary` on assistant messages in `response.output_item.added`. For the phase-less events DeepSeek actually returns, `agentCompatibilityStream` immediately emits `added` as `commentary` and keeps streaming text deltas; it buffers only that message's `response.output_item.done`. A following tool call resolves the done phase to `commentary`, while `response.completed` resolves it to `final_answer`. This keeps tool preambles expanded and lets the completed final answer collapse without buffering the whole message. GPT/native streams and non-streaming responses do not use this phase inference.
 
-The tradeoff is that a real DeepSeek final answer triggers collapse after its text finishes. Matching GPT's collapse-at-start behavior requires the upstream API to distinguish commentary from final answers reliably at message start. Permanently marking every message as commentary would also prevent proper final-answer collapsing and is not an equivalent repair.
+The tradeoff is that a real DeepSeek final answer collapses when its done/completion event arrives, while its text remains live. Matching GPT's collapse-at-start behavior requires the upstream API to distinguish commentary from final answers reliably at message start. Permanently marking every message as commentary would also prevent proper final-answer collapsing and is not an equivalent repair.
 
 ### GPT cache regression and repair
 

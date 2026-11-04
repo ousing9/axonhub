@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 
 	"github.com/looplj/axonhub/internal/ent"
 	"github.com/looplj/axonhub/internal/objects"
@@ -246,4 +247,63 @@ func TestNativeCompatibilityOrdinaryRequestIsUntouched(t *testing.T) {
 	restored, err := m.OnOutboundRawResponse(t.Context(), resp)
 	require.NoError(t, err)
 	require.Same(t, resp, restored)
+}
+
+func TestPortableStreamInfersMissingMessagePhases(t *testing.T) {
+	events := []*httpclient.StreamEvent{
+		{Type: "response.output_item.added", Data: []byte(`{"type":"response.output_item.added","item":{"type":"message","role":"assistant","id":"msg_tool","phase":null,"content":[]}}`)},
+		{Type: "response.output_text.delta", Data: []byte(`{"type":"response.output_text.delta","item_id":"msg_tool","delta":"working"}`)},
+		{Type: "response.output_item.done", Data: []byte(`{"type":"response.output_item.done","item":{"type":"message","role":"assistant","id":"msg_tool","phase":null,"content":[]}}`)},
+		{Type: "response.output_item.added", Data: []byte(`{"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","name":"probe"}}`)},
+		{Type: "response.output_item.done", Data: []byte(`{"type":"response.output_item.done","item":{"type":"function_call","id":"fc_1","name":"probe"}}`)},
+		{Type: "response.completed", Data: []byte(`{"type":"response.completed","response":{"status":"completed"}}`)},
+	}
+	stream := &agentCompatibilityStream{Stream: streams.SliceStream(events), portable: true}
+	defer stream.Close()
+	var got []string
+	for stream.Next() {
+		data := stream.Current().Data
+		got = append(got, gjson.GetBytes(data, "type").String()+":"+gjson.GetBytes(data, "item.phase").String())
+	}
+	require.NoError(t, stream.Err())
+	require.Equal(t, []string{
+		"response.output_item.added:commentary",
+		"response.output_text.delta:",
+		"response.output_item.done:commentary",
+		"response.output_item.added:",
+		"response.output_item.done:",
+		"response.completed:",
+	}, got)
+	for _, event := range events {
+		require.NotContains(t, string(event.Data), `"phase":"commentary"`, "source events must remain unchanged")
+	}
+}
+
+func TestPortableStreamInfersFinalPhaseAtCompletion(t *testing.T) {
+	events := []*httpclient.StreamEvent{
+		{Type: "response.output_item.added", Data: []byte(`{"type":"response.output_item.added","item":{"type":"message","role":"assistant","id":"msg_final","content":[]}}`)},
+		{Type: "response.output_text.delta", Data: []byte(`{"type":"response.output_text.delta","item_id":"msg_final","delta":"done"}`)},
+		{Type: "response.output_item.done", Data: []byte(`{"type":"response.output_item.done","item":{"type":"message","role":"assistant","id":"msg_final","content":[]}}`)},
+		{Type: "response.completed", Data: []byte(`{"type":"response.completed","response":{"status":"completed"}}`)},
+	}
+	stream := &agentCompatibilityStream{Stream: streams.SliceStream(events), portable: true}
+	defer stream.Close()
+	var phases []string
+	for stream.Next() {
+		if typ := gjson.GetBytes(stream.Current().Data, "type").String(); typ == "response.output_item.added" || typ == "response.output_item.done" {
+			phases = append(phases, gjson.GetBytes(stream.Current().Data, "item.phase").String())
+		}
+	}
+	require.NoError(t, stream.Err())
+	require.Equal(t, []string{"commentary", "final_answer"}, phases)
+}
+
+func TestNativeStreamDoesNotInferMissingMessagePhases(t *testing.T) {
+	event := &httpclient.StreamEvent{Type: "response.output_item.added", Data: []byte(`{"type":"response.output_item.added","item":{"type":"message","role":"assistant","id":"msg","content":[]}}`)}
+	stream := &agentCompatibilityStream{Stream: streams.SliceStream([]*httpclient.StreamEvent{event}), portable: false, portableModels: []string{"deepseek-flash"}}
+	defer stream.Close()
+	require.True(t, stream.Next())
+	require.Equal(t, string(event.Data), string(stream.Current().Data))
+	require.False(t, stream.Next())
+	require.NoError(t, stream.Err())
 }

@@ -100,9 +100,9 @@ call A → call B → output A → output B → 原指导
 
 2026-10-31 绕过 AxonHub 直连 DeepSeek 官方 API，实测同一工具前说明消息开始时为 `final_answer`，结束时变为 `commentary`。AxonHub 原先直接透传，Codex 因开始事件先折叠前文，又因结束事件重新展开。
 
-`RestoreResponse` 仅将 portable 模式下 `response.output_item.added` 中 assistant message 的 `final_answer` 改为 `commentary`；保留全部文字增量，并保留完成事件和非流式响应的最终阶段。不增加整段缓冲，也不修改 GPT 阶段。缺失或未知阶段不作推断。
+portable 模式下仍由 `RestoreResponse` 将 `response.output_item.added` 中显式的 `final_answer` 临时改为 `commentary`。对于 DeepSeek 实际返回的缺失阶段，`agentCompatibilityStream` 立即把 `added` 标为 `commentary` 并继续透传文字增量，只暂存同一消息的 `response.output_item.done`：后面出现工具调用时补为 `commentary`，收到 `response.completed` 时补为 `final_answer`。这样前导语保持展开，最终答案在完成时可以折叠，同时不缓存整段正文。GPT/native 流和非流式响应不经过这段阶段推断。
 
-体验上的取舍是：DeepSeek 真正的最终回答在文字输出完毕时才触发折叠。要恢复与 GPT 一样的开始即折叠，需要上游在开始事件可靠地区分过程与最终消息。不能用“所有消息永久标成 commentary”替代当前修复，否则最终回答也失去正常折叠能力。
+体验上的取舍是：DeepSeek 真正的最终回答要等 `done`/完成事件到达后才触发折叠，但文字仍然实时显示。要恢复与 GPT 一样的开始即折叠，需要上游在开始事件可靠地区分过程与最终消息。不能用“所有消息永久标成 commentary”替代当前修复，否则最终回答也失去正常折叠能力。
 
 ### GPT 缓存回归与修复
 

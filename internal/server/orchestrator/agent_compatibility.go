@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -147,33 +148,210 @@ func (m *agentCompatibilityMiddleware) OnOutboundRawStream(_ context.Context, st
 	return &agentCompatibilityStream{Stream: stream, portableModels: m.config.PortableModels}, nil
 }
 
+// agentCompatibilityStream restores portable tool calls and supplies the phase
+// metadata DeepSeek omits. Portable assistant messages start as commentary so
+// their text can stream immediately; only the message's done event is held
+// until a following tool call or terminal response identifies its final phase.
 type agentCompatibilityStream struct {
 	streams.Stream[*httpclient.StreamEvent]
 	portable       bool
 	portableModels []string
 	current        *httpclient.StreamEvent
 	err            error
+	sourceDone     bool
+	pending        *portableMessageBuffer
+	queued         []*httpclient.StreamEvent
+}
+
+type portableMessageBuffer struct {
+	// Only the message done event is buffered. Added and text delta events are
+	// already visible to the client with a provisional commentary phase.
+	events    []*httpclient.StreamEvent
+	itemID    string
+	donePhase string
 }
 
 func (s *agentCompatibilityStream) Next() bool {
-	if s.err != nil || !s.Stream.Next() {
+	for len(s.queued) == 0 && !s.sourceDone && s.err == nil {
+		if !s.Stream.Next() {
+			s.sourceDone = true
+			if s.pending != nil {
+				s.flushPending("final_answer")
+			}
+			break
+		}
+		raw := s.Stream.Current()
+		event, err := s.restoreEvent(raw)
+		if err != nil {
+			if s.pending != nil {
+				s.flushPending("final_answer")
+			}
+			s.err = err
+			break
+		}
+		s.consume(event)
+	}
+	if len(s.queued) == 0 {
 		return false
 	}
-	event := s.Stream.Current()
+	s.current = s.queued[0]
+	s.queued = s.queued[1:]
+	return true
+}
+
+func (s *agentCompatibilityStream) restoreEvent(event *httpclient.StreamEvent) (*httpclient.StreamEvent, error) {
 	if event == nil || len(event.Data) == 0 {
-		s.current = event
-		return true
+		return event, nil
 	}
 	body, err := agentcompat.RestoreResponse(event.Data, s.portable, s.portableModels)
 	if err != nil {
-		s.err = err
-		return false
+		return nil, err
+	}
+	if bytes.Equal(body, event.Data) {
+		return event, nil
 	}
 	copy := *event
 	copy.Data = body
-	s.current = &copy
-	return true
+	return &copy, nil
 }
+
+func (s *agentCompatibilityStream) consume(event *httpclient.StreamEvent) {
+	if !s.portable || event == nil || len(event.Data) == 0 {
+		s.queued = append(s.queued, event)
+		return
+	}
+	data := event.Data
+	if bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) {
+		if s.pending != nil {
+			s.flushPending("final_answer")
+		}
+		s.queued = append(s.queued, event)
+		return
+	}
+	typ := gjson.GetBytes(data, "type").String()
+	if s.pending == nil {
+		if typ == "response.output_item.added" && portableAssistantMessageWithoutPhase(data) {
+			s.startPortableMessage(event)
+			return
+		}
+		s.queued = append(s.queued, event)
+		return
+	}
+	if typ == "response.output_item.added" && portableToolItem(data) {
+		s.flushPending("commentary")
+		s.queued = append(s.queued, event)
+		return
+	}
+	if typ == "response.completed" || typ == "response.failed" || typ == "response.incomplete" || typ == "error" {
+		s.flushPending("final_answer")
+		s.queued = append(s.queued, event)
+		return
+	}
+	if typ == "response.output_item.done" {
+		if portableMessageItem(data) && samePortableItem(s.pending.itemID, gjson.GetBytes(data, "item.id").String()) {
+			s.pending.events = append(s.pending.events, event)
+			s.pending.donePhase = portablePhase(data)
+			return
+		}
+		if portableToolItem(data) {
+			s.flushPending("commentary")
+			s.queued = append(s.queued, event)
+			return
+		}
+	}
+	if typ == "response.output_text.delta" || typ == "response.output_text.done" {
+		if samePortableItem(s.pending.itemID, gjson.GetBytes(data, "item_id").String()) {
+			s.queued = append(s.queued, event)
+			return
+		}
+	}
+	// A new output item closes an otherwise well-formed message. Keep its
+	// explicit done phase when available; otherwise let the terminal event
+	// decide below.
+	if typ == "response.output_item.added" {
+		s.flushPending("final_answer")
+		if portableAssistantMessageWithoutPhase(data) {
+			s.startPortableMessage(event)
+			return
+		}
+	}
+	s.queued = append(s.queued, event)
+}
+
+func (s *agentCompatibilityStream) startPortableMessage(event *httpclient.StreamEvent) {
+	if event == nil {
+		return
+	}
+	updated, err := s.setMessagePhase(event, "commentary")
+	if err == nil {
+		event = updated
+	}
+	s.pending = &portableMessageBuffer{itemID: gjson.GetBytes(event.Data, "item.id").String()}
+	s.queued = append(s.queued, event)
+}
+
+func (s *agentCompatibilityStream) flushPending(defaultPhase string) {
+	if s.pending == nil {
+		return
+	}
+	phase := defaultPhase
+	if s.pending.donePhase != "" {
+		phase = s.pending.donePhase
+	}
+	for _, event := range s.pending.events {
+		if event == nil {
+			continue
+		}
+		if portablePhase(event.Data) == "" {
+			if updated, err := s.setMessagePhase(event, phase); err == nil {
+				event = updated
+			}
+		}
+		s.queued = append(s.queued, event)
+	}
+	s.pending = nil
+}
+
+func (s *agentCompatibilityStream) setMessagePhase(event *httpclient.StreamEvent, phase string) (*httpclient.StreamEvent, error) {
+	body, err := sjson.SetBytes(event.Data, "item.phase", phase)
+	if err != nil {
+		return nil, err
+	}
+	copy := *event
+	copy.Data = body
+	return &copy, nil
+}
+
+func portableMessageItem(data []byte) bool {
+	item := gjson.GetBytes(data, "item")
+	return item.Get("type").String() == "message" && item.Get("role").String() == "assistant"
+}
+
+func portableAssistantMessageWithoutPhase(data []byte) bool {
+	if !portableMessageItem(data) {
+		return false
+	}
+	phase := gjson.GetBytes(data, "item.phase")
+	return !phase.Exists() || phase.Type == gjson.Null
+}
+
+func portablePhase(data []byte) string {
+	phase := gjson.GetBytes(data, "item.phase")
+	if !phase.Exists() || phase.Type == gjson.Null {
+		return ""
+	}
+	return phase.String()
+}
+
+func portableToolItem(data []byte) bool {
+	typ := gjson.GetBytes(data, "item.type").String()
+	return typ != "" && (strings.HasSuffix(typ, "_call") || typ == "function_call")
+}
+
+func samePortableItem(expected, actual string) bool {
+	return expected == "" || actual == "" || expected == actual
+}
+
 func (s *agentCompatibilityStream) Current() *httpclient.StreamEvent { return s.current }
 func (s *agentCompatibilityStream) Err() error {
 	if s.err != nil {
